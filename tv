@@ -3,7 +3,8 @@
 """
 tv: control living-room TV
 
-The Sony TV has a JSON REST-ish RPC interface.
+The Sony TV has a JSON REST-ish RPC interface.  We can call it.
+We enter a REPL if no parameters are provided.
 
 Beware that digits on the remote do not enter ASCII digits but some other
 unicode digits.
@@ -22,6 +23,7 @@ import base64
 import collections
 from dataclasses import dataclass
 import html
+import inspect
 import json
 import os
 import pathlib
@@ -31,6 +33,7 @@ import secrets
 import shlex
 import sys
 import time
+import traceback
 import typing
 
 # TV can encrypt text strings, which we want for sending/reading passwords in app prompts
@@ -102,7 +105,15 @@ class BadInput(Exit):
     pass
 
 
+# InfraRed Compatible Control data from the TV, for the SOAP interface
 IRCCKeyCode = collections.namedtuple('IRCCKeyCode', ['KeyName', 'Rawcode'])
+
+# Readline context management
+# If IsCommandSet we will switch; if false, we need to figure out what to do
+# differently.
+# If Swallow, it takes all remaining args instead of having sub commands.
+# MapSubCommands lets us build a tree.
+RLContext = collections.namedtuple('RLContext', ['Name', 'IsCommandSet', 'Swallow', 'MapSubCommands'])
 
 
 @dataclass
@@ -465,29 +476,34 @@ class Remote:
     # Commander as debug commands, specified with a leading colon,
     # thus `tv :query_time` works.
 
+    def _query_show_json(self, *args, result_index=0, **kwargs) -> None:
+        res = self.query(*args, **kwargs)
+        self.check_error(inspect.stack()[1].function, res)
+        pretty_print_json(res['result'][result_index])
+
     def query_supported_apis(self) -> None:
-        pretty_print_json(self.query('guide', 'getSupportedApiInfo', {'services': Remote.KNOWN_SERVICES}))
+        self._query_show_json('guide', 'getSupportedApiInfo', {'services': Remote.KNOWN_SERVICES})
 
     def query_time(self) -> None:
-        pretty_print_json(self.query('system', 'getCurrentTime', {}, api_version='1.1'))
+        self._query_show_json('system', 'getCurrentTime', {}, api_version='1.1')
 
     def query_network_settings(self) -> None:
         # We shouldn't need netif per the spec, but we get "Illegal Argument" without it
-        pretty_print_json(self.query('system', 'getNetworkSettings', {'netif': ''}))
+        self._query_show_json('system', 'getNetworkSettings', {'netif': ''})
 
     def query_interface_information(self) -> None:
-        pretty_print_json(self.query('system', 'getInterfaceInformation', {})['result'][0])
+        self._query_show_json('system', 'getInterfaceInformation', {})
 
     def query_sound_settings(self) -> None:
         # Array, one for each target
-        pretty_print_json(self.query('audio', 'getSoundSettings', {'target': ''}, api_version='1.1')['result'][0])
+        self._query_show_json('audio', 'getSoundSettings', {'target': ''}, api_version='1.1')
 
     def query_speaker_settings(self) -> None:
         # Array, one for each target
-        pretty_print_json(self.query('audio', 'getSpeakerSettings', {'target': ''})['result'][0])
+        self._query_show_json('audio', 'getSpeakerSettings', {'target': ''})
 
     def query_playing_content_info(self) -> None:
-        pretty_print_json(self.query('avContent', 'getPlayingContentInfo', {})['result'][0])
+        self._query_show_json('avContent', 'getPlayingContentInfo', {})
 
     def setup_encryption(self, force_fetch=False, tv_only=False, **kwargs) -> None:
         if not tv_only:
@@ -584,6 +600,12 @@ class Remote:
         self.config.save_ircc_codes(codes)
         self._ircc_dict = codes
 
+    # These _should_ be pre-empted by any actual key definitions of this name
+    fallback_key_aliases = {
+        'back': 'return',
+        'select': 'confirm',
+    }
+
     def key(self, keyname: str) -> None:
         self._setup_ircc()
 
@@ -593,7 +615,12 @@ class Remote:
         lk = keyname.lower()
 
         if lk not in self._ircc_dict:
-            raise BadInput(f'unknown keycode {keyname!r}')
+            if lk in self.fallback_key_aliases and self.fallback_key_aliases[lk] in self._ircc_dict:
+                new_lk = self.fallback_key_aliases[lk]
+                print(f'tv key: alias fixup: {lk!r} -> {new_lk!r}', file=sys.stderr)
+                lk = new_lk
+            else:
+                raise BadInput(f'unknown keycode {keyname!r}')
         self._send_ircc_rawcode(self._ircc_dict[lk].Rawcode)
 
     def known_keys(self) -> typing.List[str]:
@@ -621,6 +648,15 @@ class Commander:
         self.vol_matcher = re.compile(r'^([+-])(\d+)\Z')
         self.repl = False
 
+    def _completion_init(self):
+        self._completion_populate_values()
+        self._complete_previous = None
+        self._complete_previous_ctx = ''
+        self._complete_cache_prev = None
+        self._completion_context_stack = []
+        self._prior_completer = None
+        self._prior_push_ctx = None
+
     def next(self, previous: str) -> str:
         try:
             return self.commands.pop(0)
@@ -645,6 +681,36 @@ class Commander:
     _command_typos = {
         'hmdi': 'hdmi',
     }
+
+    def _completion_populate_values(self) -> None:
+        # FIXME: this needs to be a proper dispatch system
+        all_commands = [
+            'on', 'off', 'power', '?power', 'mute', 'unmute',
+            'hdmi', 'composite', 'scart',
+            'vol', 'volume', 'get-vol', 'get-volume', '?vol', '?volume',
+            'read', 'read-text', 'write', 'write-text', 'send-text',
+            'app', 'apps', '?apps', 'list-apps',
+            'list-inputs', '?inputs',
+            'key', ':keys',
+            'danger-reboot',
+            ':write', ':default', ':encrypt-setup', ':encrypt-fetch', ':about', ':playing', ':query',
+            'help', '?help', ':help',  # skip '?'
+        ] + [':'+q for q in dir(self.remote) if q.startswith('query_')]
+        # If changing this from sorted, check completion logic.
+        self._top_completions = sorted(all_commands)
+
+        key_commands = self.remote.known_keys()
+        self._key_completions = sorted(key_commands)
+
+        app_names = self.remote.list_apps()
+        self._app_completions = sorted(app_names)
+
+        # The MapSubCommands third item in the tuple is to let us walk down so a third level
+        # could be completed by looking in that, instead of self._rl_contexts.
+        self._rl_contexts = {
+            'key': RLContext('key', True, True, {}),
+            'app': RLContext('app', True, False, {})
+        }
 
     def one(self, command: str) -> None:
         remote = self.remote
@@ -787,7 +853,7 @@ class Commander:
                 print(':', cmd, sep='')
             return
 
-        elif command in ('help', '?help', ':help'):
+        elif command in ('help', '?help', ':help', '?'):
             print('''tv: <one or more commands>
  on          off             ?power
  mute        unmute
@@ -830,6 +896,8 @@ If the first keycode is left-square bracket, params up until ] are all keys.
 
     def cli(self) -> None:
         self.repl = True
+        self._completion_init()
+        readline.parse_and_bind('tab: complete')
         if self.remote.config.readline_config.exists():
             readline.read_init_file(self.remote.config.readline_config)
         if hasattr(readline, 'read_history_file'):
@@ -841,26 +909,222 @@ If the first keycode is left-square bracket, params up until ] are all keys.
         if hasattr(readline, 'write_history_file'):
             readline.write_history_file(self.remote.config.readline_history)
 
+    # The completion system is a bit hairy.  It swallows exceptions, and
+    # because we're in the middle of an input line we can't print there and
+    # then.  So we take a two-pronged approach, with far too much logic which
+    # an app shouldn't need to worry itself with (hint: a good completion
+    # system would provide a diagnostic interface!):
+    # 1. We import traceback and manually show exceptions ourselves, which
+    #    matters with the slightly baroque calling conventions
+    # 2. If verbose >= 3 then we claim the first line of the display and print
+    #    diagnostic text up there.  This relies upon the common non-ANSI escape
+    #    sequences to push and pop cursor position.
+
+    def complete_debug(self, msg: str) -> None:
+        if self.options.verbose < 3:
+            return
+        MAX = 70
+        if len(msg) > MAX:
+            msg = '«' + msg[-(MAX-1):]
+        bookend = f'\033[41;36m *** \033[m'
+        buf = msg + ' ' * (MAX - len(msg))
+        print(f'\033[s\033[1;1H{bookend}\033[1;35m{buf}\033[m{bookend}\033[u', end='', flush=True)
+
+    def cdbg(self, append: typing.Optional[str]) -> None:
+        if append is None:
+            self._debug_completion_buf = ''
+            return
+        self._debug_completion_buf += ' ' + append
+        self.complete_debug(self._debug_completion_buf)
+
+    def push_rl_context(self, name: str) -> None:
+        if hasattr(self, '_rl_context_current'):
+            self._completion_context_stack.append(self._rl_context_current)
+        self._rl_context_current = name
+        self._command_set = f'_{name}_completions'
+
+    def pop_rl_context(self) -> None:
+        self._rl_context_current = self._completion_context_stack.pop()
+        self._command_set = f'_{self._rl_context_current}_completions'
+
+    def _complete_commands(self, text: str, state: int) -> str:
+        # readline swallows exceptions!
+        try:
+            return self._complete_commands_r(text, state)
+        except Exception as e:
+            print(f'\noops: {e!r} inside completion', file=sys.stderr)
+            traceback.print_exc(file=sys.stdout)
+
+    def _complete_commands_r(self, text: str, state: int) -> str:
+        self.cdbg(f'completion: {text!r} [{state!r}]')
+        ltext = text.lower()
+        if ltext and ltext[0] == "'":
+            ltext = ltext[1:]
+        if self._complete_previous_ctx != self._rl_context_current:
+            # We have switched commands, the cache is bad.
+            # Especially for the empty string case.
+            self._complete_previous = None
+            self._complete_cache_prev = None
+            self._complete_previous_ctx = self._rl_context_current
+        if self._complete_previous is not None and ltext == self._complete_previous:
+            self.cdbg('match-prev')
+            if self._complete_cache_prev is None:
+                self.cdbg('none-avail')
+                return None
+            self.cdbg('cached')
+            if state >= len(self._complete_cache_prev):
+                self.cdbg('off-end')
+                return None
+            result = self._complete_cache_prev[state]
+            return shlex.quote(result) if ' ' in result else result
+        elif self._complete_previous is not None and ltext.startswith(self._complete_previous):
+            self.cdbg('substr')
+            considered = self._complete_cache_prev
+        else:
+            self.cdbg('reset-cand')
+            considered = getattr(self, self._command_set)
+        self._complete_previous, self._complete_cache_prev = None, None
+        # This list is pre-sorted so that state consistently indexes it; since
+        # we're caching it, that should be fine.
+        avail = [c for c in considered if c.lower().startswith(ltext)]
+        return_avail = [shlex.quote(c) if ' ' in c else c for c in avail]
+        self._complete_previous = ltext
+        if not avail:
+            self.cdbg(f'none-found-({len(considered)})')
+            return None
+        self._complete_cache_prev = avail
+        try:
+            self.cdbg(f'matched-in-{len(avail)}')
+            return return_avail[state]
+        except IndexError:
+            self.cdbg('FIN')
+            return None
+        self.cdbg('fell-off-end')
+
+    def use_completer(self, name: str, push_ctx: str, text: str, state: int) -> str:
+        if self.options.verbose >= 4:
+            print(f'use_completer {name!r} in state {state}', file=sys.stderr, flush=True)
+        self._prior_completer = getattr(self, name)
+        self._prior_push_ctx = push_ctx
+        return getattr(self, name)(text, state)
+
+    def _rl_completer(self, text: str, state: int) -> str:
+        if state != 0:
+            # We're iterating to get subsequent words, re-use the same completer.
+            if self._prior_completer is not None:
+                if self._prior_push_ctx is None:
+                    return self._prior_completer(text, state)
+                else:
+                    try:
+                        self.push_rl_context(self._prior_push_ctx)
+                        return self._prior_completer(text, state)
+                    finally:
+                        self.pop_rl_context()
+        self._prior_completer = None
+
+        self.cdbg(None)
+        # We have text which is the current word, but we don't know the word number.
+        # In theory, text == line[begin:end] after these queries:
+        line = readline.get_line_buffer()
+        begin = readline.get_begidx()
+        end = readline.get_endidx()
+        prior_words = shlex.split(line[:begin])
+        self.cdbg(f'RLC {line!r} [{begin}, {end}] {prior_words!r}')
+        if not prior_words:
+            return self.use_completer('_complete_commands', None, text, state)
+        pushed = False
+        push_candidate = None
+        ctx_tree = self._rl_contexts
+        prior_count = len(prior_words)
+        last_index = prior_count - 1
+        word_index = -1
+        ctx = None
+        while word_index + 1 <= last_index:
+            word_index += 1
+            word = prior_words[word_index]
+            if word in ctx_tree:
+                ctx = ctx_tree[word]
+                if ctx.IsCommandSet:
+                    if word_index == last_index:
+                        # common case
+                        push_candidate = ctx.Name
+                        break
+                    if prior_words[word_index+1] == '[':
+                        # key [ foo bar baz ] cmd2
+                        # here: word_index == 0, we know there's one more
+                        word_index += 1
+                        ended = False
+                        while word_index + 1 <= last_index:
+                            word_index += 1
+                            if prior_words[word_index] == ']':
+                                ended = True
+                                break
+                        if not ended:
+                            push_candidate = ctx.Name
+                            break
+                if not ctx.Swallow:
+                    ctx_tree = ctx
+            # else not in ctx_tree, so it's not taking params, so stay in the current state.
+        try:
+            if push_candidate is not None:
+                self.push_rl_context(push_candidate)
+                pushed = True
+                return self.use_completer('_complete_commands', push_candidate, text, state)
+            else:
+                return self.use_completer('_complete_commands', push_candidate, text, state)
+        finally:
+            if pushed:
+                self.pop_rl_context()
+        return None
+
     def cli_body_top(self):
+        self.push_rl_context('top')
+        readline.set_completer(self._rl_completer)
+        # We mostly don't want : or ? in there because we use them as part of
+        # command-names; for app names, the quote is part of the completion.
+        readline.set_completer_delims(' \t\n')
+        # Python default completer delims:
+        #   ' \t\n`~!@#$%^&*()-=+[{]}\\|;:\'",<>/?'
         while True:
             try:
+                if self.options.verbose >= 4:
+                    print(f'ctx={self._rl_context_current!r} cmdset={self._command_set!r} stack={self._completion_context_stack!r} prev={self._complete_previous!r}', file=sys.stderr, flush=True)
                 cmd = input('tv> ')
             except EOFError:
                 print()
                 return
+            except KeyboardInterrupt as e:
+                print()
+                raise Exit(f'killed by {e!r}') from e
             try:
-                self.commands = cmd.split()
+                cmd = cmd.strip()
+                if cmd.startswith('#'):
+                    continue
+                self.commands = shlex.split(cmd)
                 self.loop()
             except BadInput as e:
                 print('tv:', e, file=sys.stderr)
             except SubRepl as e:
                 handler = 'cli_body_' + str(e)
                 if hasattr(self, handler):
+                    hold = readline.get_completer()
+                    ctx_cmds = f'_{str(e)}_completions'
+                    pushed = False
+                    if hasattr(self, ctx_cmds):
+                        self.push_rl_context(str(e))
+                        pushed = True
                     getattr(self, handler)()
+                    readline.set_completer(hold)
+                    if pushed:
+                        self.pop_rl_context()
                 else:
                     raise Error(f'unknown SubRepl {e}, coding bug here') from e
 
     def cli_body_key(self):
+        # Do we need a different history file, or prefix?
+        # I think not; it hasn't happened yet, but I suspect a common pattern
+        # will be to enter a key name at the top level, fail, type 'key', then
+        # up-arrow twice.
         while True:
             try:
                 cmd = input('tv key> ')
@@ -868,7 +1132,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
                 print()
                 return
             try:
-                self.commands = ['key', '['] + cmd.split() + [']']
+                self.commands = ['key', '['] + shlex.split(cmd) + [']']
                 self.loop()
             except BadInput as e:
                 print('tv key:', e, file=sys.stderr)
