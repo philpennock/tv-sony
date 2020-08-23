@@ -4,6 +4,9 @@
 tv: control living-room TV
 
 The Sony TV has a JSON REST-ish RPC interface.
+
+Beware that digits on the remote do not enter ASCII digits but some other
+unicode digits.
 """
 
 __author__ = 'phil@pennock-tech.com (Phil Pennock)'
@@ -29,17 +32,34 @@ except ImportError:
     def pretty_print_json(data) -> None:
         json.dumps(data, sort_keys=True, indent=2)
 
-
-# Beware that digits on the remote do not enter ASCII digits but some other unicode digits
-TV_PIN_FILE = os.path.expanduser('~/.config/pdp/tv-pin')
-TV_HOST = 'maneki-neko.lan'
-DEF_USERAGENT = 'tv/0.1 (Phil Pennock)'
-
 if sys.version_info < (3, 6):
     raise Exception('Need at least Python 3.6 for this tool')
     # pathlib, f-strings
 
 SCRIPT_DIR = pathlib.Path(__file__).absolute().parent
+
+# FIXME: this is not fully XDG-compliant
+_APP_NAME = pathlib.Path('tv')
+_HOME_DIR = _APP_NAME.home()
+
+
+def _xdg_dir(varname: str, home_rel_default: typing.Sequence[str]) -> pathlib.Path:
+    ps = os.getenv(varname, None)
+    if ps is None:
+        p = _HOME_DIR
+        for n in home_rel_default:
+            p = p / n
+    else:
+        p = pathlib.Path(ps)
+    return p / _APP_NAME
+
+
+_CONFIG_DIR = _xdg_dir('XDG_CONFIG_HOME', ('.config',))      # read files: default.pin and default.hostname
+_CACHE_DIR = _xdg_dir('XDG_CACHE_HOME', ('.cache',))         # keep a copy of the TV's public key for encryption
+_DATA_DIR = _xdg_dir('XDG_DATA_HOME', ('.local', 'share',))  # keep our local private/public keys for encryption
+_DEFAULT_TV = 'default'
+
+DEF_USERAGENT = 'tv/0.2 (Phil Pennock)'
 
 
 class Error(Exception):
@@ -57,12 +77,70 @@ class Exit(Exception):
     pass
 
 
-class Remote:
-    def __init__(self, addr: str, pin: str, options: argparse.Namespace) -> None:
-        self.next_id = 1
+class Config(pdpgeneric.VerboseObject):
+    PIN_OPTION, PIN_FILEEXT = 'pin', 'pin'
+    HOST_OPTION, HOST_FILEEXT = 'host', 'hostname'
+
+    def __init__(self, options: argparse.Namespace) -> None:
         self.options = options
-        self.addr = addr
-        self.pin = pin
+        super().__init__()
+        self.verbose_tag_add('Config')
+        self.tv_pin = self.derive_field(Config.PIN_OPTION, Config.PIN_FILEEXT)
+        self.tv_host = self.derive_field(Config.HOST_OPTION, Config.HOST_FILEEXT)
+        self.verbose(f'host is {self.tv_host!r}')
+        self.verbose(f'PIN is {self.tv_pin!r}', level=9)
+
+    def derive_field(self, optname: str, base: str) -> str:
+        t = getattr(self.options, optname)
+        if t:
+            return t
+        return self.read_config(base)
+
+    def read_config(self, base: str) -> str:
+        fn = _CONFIG_DIR / (self.options.tv + '.' + base)
+        return fn.read_text().strip()
+
+    def persist_current(self) -> None:
+        write_name = self.options.new_tvname if self.options.new_tvname else self.options.tv
+        forbidden = [os.path.sep, os.path.pathsep]
+        if os.path.extsep:
+            forbidden += [os.path.extsep]
+        if True in [c in write_name for c in forbidden]:
+            raise Error(f'bad characters in {write_name!r}')
+
+        # We will write the derived merged values, so can modify an existing TV to a new name.
+
+        default_pin_file = _CONFIG_DIR / (_DEFAULT_TV + '.' + Config.PIN_FILEEXT)
+        default_host_file = _CONFIG_DIR / (_DEFAULT_TV + '.' + Config.HOST_FILEEXT)
+        if write_name == _DEFAULT_TV:
+            write_name = _DEFAULT_TV + '-real'
+        pin_file = _CONFIG_DIR / (write_name + '.' + Config.PIN_FILEEXT)
+        host_file = _CONFIG_DIR / (write_name + '.' + Config.HOST_FILEEXT)
+        # Don't update defaults until both named entries have been written
+        for f, content in [(pin_file, self.tv_pin), (host_file, self.tv_host)]:
+            if f.exists():
+                f.unlink()
+            f.touch(mode=0o600, exist_ok=False)
+            f.write_text(content + '\n', encoding='utf-8')
+        # We have no locking here, so not safe against a concurrent reader.
+        # For myself now, I don't currently care.
+        for src, dest in [(default_pin_file, pin_file), (default_host_file, host_file)]:
+            if src.exists() and not src.is_symlink():
+                src.rename(src.with_suffix('.old' + src.suffix))
+            if src.exists():
+                src.unlink()
+            src.symlink_to(dest.name)
+
+
+class Remote(pdpgeneric.VerboseObject):
+    def __init__(self, config: Config) -> None:
+        self.options = config.options
+        super().__init__()
+        self.verbose_tag_add('Remote')
+        self.config = config
+        self.next_id = 1
+        self.addr = config.tv_host
+        self.pin = config.tv_pin
         self._setup_requests()
 
     def _setup_requests(self) -> None:
@@ -180,8 +258,11 @@ class Remote:
         pretty_print_json(self.query('avContent', 'getPlayingContentInfo', {})['result'][0])
 
 
-class Commander:
+class Commander(pdpgeneric.VerboseObject):
     def __init__(self, remote: Remote, commands: typing.List[str]) -> None:
+        self.options = remote.options
+        super().__init__()
+        self.verbose_tag_add('Commander')
         self.remote = remote
         self.commands = commands
         self.vol_matcher = re.compile(r'^([+-])(\d+)\Z')
@@ -323,12 +404,24 @@ def _main(args: typing.List[str], argv0: str) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('-t', '--tv',
+                        type=str, default=_DEFAULT_TV,
+                        help='Override configuration name for TV [%(default)s]')
     parser.add_argument('-H', '--host',
-                        type=str, default=TV_HOST,
+                        type=str, default='',
                         help='Override TV host/IP [%(default)s]')
     parser.add_argument('--pin',
                         type=str, default='',
                         help='override PIN from config')
+    parser.add_argument('-w', '--write',
+                        action='store_true', default=False,
+                        help='Write out config from flags, make default')
+    parser.add_argument('--new-tvname',
+                        type=str, default='',
+                        help='With -w use a new name instead of --tv for the config')
+    parser.add_argument('-E', '--setup-encryption',
+                        action='store_true', default=False,
+                        help='Preemptively setup encryption')
     parser.add_argument('-v', '--verbose',
                         action='count', default=0,
                         help='Be more verbose')
@@ -336,11 +429,13 @@ def _main(args: typing.List[str], argv0: str) -> int:
                         help='TV commands to issue (try :help)')
     options = parser.parse_args(args=args)
 
-    if options.pin:
-        tv_pin = options.pin
-    else:
-        tv_pin = open(TV_PIN_FILE).read().strip()
-    remote = Remote(options.host, tv_pin, options)
+    config = Config(options)
+    if options.write:
+        config.persist_current()
+
+    remote = Remote(config)
+    if options.setup_encryption:
+        remote.setup_encryption()
 
     commander = Commander(remote, options.rest)
     commander.loop()
