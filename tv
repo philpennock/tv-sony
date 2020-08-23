@@ -12,6 +12,7 @@ unicode digits.
 __author__ = 'phil@pennock-tech.com (Phil Pennock)'
 
 import argparse
+import base64
 import html
 import os
 import pathlib
@@ -85,8 +86,16 @@ class Config(pdpgeneric.VerboseObject):
         self.options = options
         super().__init__()
         self.verbose_tag_add('Config')
+        # .tv is the config name as given, often 'default
+        # .real_tv is the actual name, use this to write files
+        self.tv = self.options.tv
         self.tv_pin = self.derive_field(Config.PIN_OPTION, Config.PIN_FILEEXT)
         self.tv_host = self.derive_field(Config.HOST_OPTION, Config.HOST_FILEEXT)
+        self.using_default = self.tv == _DEFAULT_TV
+        if self.using_default:
+            self.real_tv = self._find_real_tvname()
+        else:
+            self.real_tv = self.tv
         self.verbose(f'host is {self.tv_host!r}')
         self.verbose(f'PIN is {self.tv_pin!r}', level=9)
 
@@ -100,8 +109,24 @@ class Config(pdpgeneric.VerboseObject):
         fn = _CONFIG_DIR / (self.options.tv + '.' + base)
         return fn.read_text().strip()
 
+    def _find_real_tvname(self) -> str:
+        default_pin_file = _CONFIG_DIR / (_DEFAULT_TV + '.' + Config.PIN_FILEEXT)
+        return default_pin_file.resolve().stem
+
+    @property
+    def tv_keyfile(self) -> pathlib.Path:
+        return _CACHE_DIR / (self.real_tv + '.tv.rsa.pub')
+
+    @property
+    def our_public_keyfile(self) -> pathlib.Path:
+        return _DATA_DIR / 'our.rsa.pub'
+
+    @property
+    def our_private_keyfile(self) -> pathlib.Path:
+        return _DATA_DIR / 'our.rsa.private'
+
     def persist_current(self) -> None:
-        write_name = self.options.new_tvname if self.options.new_tvname else self.options.tv
+        write_name = self.options.new_tvname if self.options.new_tvname else self.real_tv
         forbidden = [os.path.sep, os.path.pathsep]
         if os.path.extsep:
             forbidden += [os.path.extsep]
@@ -109,6 +134,9 @@ class Config(pdpgeneric.VerboseObject):
             raise Error(f'bad characters in {write_name!r}')
 
         # We will write the derived merged values, so can modify an existing TV to a new name.
+
+        if not _CONFIG_DIR.exists():
+            _CONFIG_DIR.mkdir(mode=0o700, parents=True)
 
         default_pin_file = _CONFIG_DIR / (_DEFAULT_TV + '.' + Config.PIN_FILEEXT)
         default_host_file = _CONFIG_DIR / (_DEFAULT_TV + '.' + Config.HOST_FILEEXT)
@@ -131,6 +159,12 @@ class Config(pdpgeneric.VerboseObject):
                 src.unlink()
             src.symlink_to(dest.name)
 
+    def setup_thisremote_encryption(self):
+        self.verbose('XXX MISSING: GENERATE OWN RSA KEY', level=0)
+        # self.config.our_public_keyfile
+        # self.config.our_private_keyfile
+        pass
+
 
 class Remote(pdpgeneric.VerboseObject):
     def __init__(self, config: Config) -> None:
@@ -141,6 +175,8 @@ class Remote(pdpgeneric.VerboseObject):
         self.next_id = 1
         self.addr = config.tv_host
         self.pin = config.tv_pin
+        self._tv_pubkey_b64 = None
+        self._tv_pubkey = None
         self._setup_requests()
 
     def _setup_requests(self) -> None:
@@ -256,6 +292,25 @@ class Remote(pdpgeneric.VerboseObject):
 
     def query_playing_content_info(self) -> None:
         pretty_print_json(self.query('avContent', 'getPlayingContentInfo', {})['result'][0])
+
+    def setup_encryption(self, force_fetch=False, tv_only=False) -> None:
+        if not tv_only:
+            self.config.setup_thisremote_encryption()
+        if self.config.tv_keyfile.exists() and not force_fetch:
+            self._tv_pubkey_b64 = self.config.tv_keyfile.read_bytes().strip()
+        else:
+            kd = self.query('encryption', 'getPublicKey', {})
+            self._tv_pubkey_b64 = kd['result'][0]['publicKey']
+            if not self.config.tv_keyfile.parent.exists():
+                self.config.tv_keyfile.parent.mkdir(0o700)
+            self.config.tv_keyfile.write_text(self._tv_pubkey_b64 + '\n')
+        self._tv_pubkey = base64.b64decode(self._tv_pubkey_b64, validate=True)
+
+    @property
+    def tv_pubkey(self) -> bytes:
+        if self._tv_pubkey is None:
+            self.setup_encryption(tv_only=True)
+        return self._tv_pubkey
 
 
 class Commander(pdpgeneric.VerboseObject):
