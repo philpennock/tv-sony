@@ -7,12 +7,19 @@ The Sony TV has a JSON REST-ish RPC interface.
 
 Beware that digits on the remote do not enter ASCII digits but some other
 unicode digits.
+
+Beware that encryption keys are not very securely managed, but I think it's
+about appropriate for use as a TV remote, since I don't want to have to enter a
+password to talk to the TV.  So we have a `changeme` level non-secret used as
+a tiny obfuscation layer for local storage.  Since we're already storing the PIN
+to talk to the TV in clear-text on disk, there's no worse vulnerability here.
 """
 
 __author__ = 'phil@pennock-tech.com (Phil Pennock)'
 
 import argparse
 import base64
+from dataclasses import dataclass
 import html
 import os
 import pathlib
@@ -22,6 +29,10 @@ import sys
 import time
 import typing
 
+# TV can encrypt text strings, which we want for sending/reading passwords in app prompts
+import cryptography.hazmat.backends
+import cryptography.hazmat.primitives.asymmetric.rsa
+# Sane HTTP
 import requests
 
 try:
@@ -61,6 +72,12 @@ _DATA_DIR = _xdg_dir('XDG_DATA_HOME', ('.local', 'share',))  # keep our local pr
 _DEFAULT_TV = 'default'
 
 DEF_USERAGENT = 'tv/0.2 (Phil Pennock)'
+# This exists just for local disk and might as well be the empty string, but I
+# don't want to fight APIs any more, so this is one generated password which
+# I'm leaving in source, on the basis that it's like bouncycastle's "changeme"
+# string: a password that's not a password, just a known serialization
+# constant:
+PRIVATE_KEY_PASSWORD = b'Wh#2#*4zbWBH0_o4x,Ad'
 
 
 class Error(Exception):
@@ -98,6 +115,7 @@ class Config(pdpgeneric.VerboseObject):
             self.real_tv = self.tv
         self.verbose(f'host is {self.tv_host!r}')
         self.verbose(f'PIN is {self.tv_pin!r}', level=9)
+        self.our_rsakey = None
 
     def derive_field(self, optname: str, base: str) -> str:
         t = getattr(self.options, optname)
@@ -159,11 +177,73 @@ class Config(pdpgeneric.VerboseObject):
                 src.unlink()
             src.symlink_to(dest.name)
 
-    def setup_thisremote_encryption(self):
-        self.verbose('XXX MISSING: GENERATE OWN RSA KEY', level=0)
-        # self.config.our_public_keyfile
-        # self.config.our_private_keyfile
-        pass
+    @dataclass
+    class WrapCrypto:
+        backend: typing.Any = cryptography.hazmat.backends.default_backend()
+        DER: typing.Any = cryptography.hazmat.primitives.serialization.Encoding.DER
+        PEM: typing.Any = cryptography.hazmat.primitives.serialization.Encoding.PEM
+        PKCS1: typing.Any = cryptography.hazmat.primitives.serialization.PublicFormat.PKCS1
+        PKCS8: typing.Any = cryptography.hazmat.primitives.serialization.PrivateFormat.PKCS8
+        SPKI: typing.Any = cryptography.hazmat.primitives.serialization.PublicFormat.SubjectPublicKeyInfo
+        PrivateRaw: typing.Any = cryptography.hazmat.primitives.serialization.PrivateFormat.Raw
+        # NoEncryption apparently does not satisfy KeySerializationEncryption
+        # I want one fixed serialization type so I can safely load, but
+        # cryptography only lets me have access to the mutable curated choice.
+        BestAvailableEncryption: typing.Any = cryptography.hazmat.primitives.serialization.BestAvailableEncryption
+        want_exponent: int = 65537
+        want_keysize: int = 2048
+
+    Crypto = WrapCrypto()
+
+    def load_pubkey_b64(self, b64data: str) -> cryptography.hazmat.primitives.asymmetric.rsa.RSAPublicKey:
+        return self.load_pubkey_bin(self, base64.b64decode(b64data, validate=True))
+
+    def load_pubkey_bin(self, bindata: str) -> cryptography.hazmat.primitives.asymmetric.rsa.RSAPublicKey:
+        return cryptography.hazmat.primitives.serialization.load_der_public_key(bindata, backend=self.Crypto.backend)
+
+    def make_rsa_key(self) -> cryptography.hazmat.primitives.asymmetric.rsa.RSAPrivateKey:
+        return cryptography.hazmat.primitives.asymmetric.rsa.generate_private_key(
+            public_exponent=self.Crypto.want_exponent,
+            key_size=self.Crypto.want_keysize,
+            backend=self.Crypto.backend)
+
+    def write_file(self, fpath: pathlib.Path, data: bytes) -> None:
+        if not fpath.parent.exists():
+            fpath.parent.mkdir(0o700)
+        if fpath.exists():
+            saved = fpath.with_suffix('.old' + fpath.suffix)
+            if saved.exists():
+                saved.unlink()
+            fpath.rename(saved)
+        fpath.touch(mode=0o600, exist_ok=False)
+        fpath.write_bytes(data)
+
+    def save_our_private_key(self, rsakey: cryptography.hazmat.primitives.asymmetric.rsa.RSAPrivateKey) -> None:
+        self.write_file(
+            self.our_private_keyfile,
+            rsakey.private_bytes(
+                encoding=self.Crypto.PEM,
+                format=self.Crypto.PKCS8,
+                encryption_algorithm=self.Crypto.BestAvailableEncryption(PRIVATE_KEY_PASSWORD)),
+        )
+
+    def save_our_public_key(self, rsakey: cryptography.hazmat.primitives.asymmetric.rsa.RSAPrivateKey) -> None:
+        # We don't use this ourselves, we do this so that other tooling can look at it if wanted.
+        self.write_file(
+            self.our_public_keyfile,
+            rsakey.public_key().public_bytes(self.Crypto.PEM, self.Crypto.PKCS1),
+        )
+
+    def setup_thisremote_encryption(self, force_new_remote_key=False) -> None:
+        if self.our_private_keyfile.exists() and not force_new_remote_key:
+            self.our_rsakey = cryptography.hazmat.primitives.serialization.load_pem_private_key(
+                self.our_private_keyfile.read_bytes(),
+                password=PRIVATE_KEY_PASSWORD,
+                backend=self.Crypto.backend)
+        else:
+            self.our_rsakey = self.make_rsa_key()
+            self.save_our_public_key(self.our_rsakey)
+            self.save_our_private_key(self.our_rsakey)
 
 
 class Remote(pdpgeneric.VerboseObject):
@@ -176,7 +256,7 @@ class Remote(pdpgeneric.VerboseObject):
         self.addr = config.tv_host
         self.pin = config.tv_pin
         self._tv_pubkey_b64 = None
-        self._tv_pubkey = None
+        self._tv_pubkey_bin = None
         self._setup_requests()
 
     def _setup_requests(self) -> None:
@@ -293,9 +373,9 @@ class Remote(pdpgeneric.VerboseObject):
     def query_playing_content_info(self) -> None:
         pretty_print_json(self.query('avContent', 'getPlayingContentInfo', {})['result'][0])
 
-    def setup_encryption(self, force_fetch=False, tv_only=False) -> None:
+    def setup_encryption(self, force_fetch=False, tv_only=False, **kwargs) -> None:
         if not tv_only:
-            self.config.setup_thisremote_encryption()
+            self.config.setup_thisremote_encryption(**kwargs)
         if self.config.tv_keyfile.exists() and not force_fetch:
             self._tv_pubkey_b64 = self.config.tv_keyfile.read_bytes().strip()
         else:
@@ -304,13 +384,13 @@ class Remote(pdpgeneric.VerboseObject):
             if not self.config.tv_keyfile.parent.exists():
                 self.config.tv_keyfile.parent.mkdir(0o700)
             self.config.tv_keyfile.write_text(self._tv_pubkey_b64 + '\n')
-        self._tv_pubkey = base64.b64decode(self._tv_pubkey_b64, validate=True)
+        self._tv_pubkey_bin = base64.b64decode(self._tv_pubkey_b64, validate=True)
 
     @property
     def tv_pubkey(self) -> bytes:
-        if self._tv_pubkey is None:
+        if self._tv_pubkey_bin is None:
             self.setup_encryption(tv_only=True)
-        return self._tv_pubkey
+        return self.config.load_pubkey_bin(self._tv_pubkey_bin)
 
 
 class Commander(pdpgeneric.VerboseObject):
@@ -455,7 +535,7 @@ class Commander(pdpgeneric.VerboseObject):
             self.one(self.next('').lower())
 
 
-def _main(args: typing.List[str], argv0: str) -> int:
+def _setup_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -482,6 +562,11 @@ def _main(args: typing.List[str], argv0: str) -> int:
                         help='Be more verbose')
     parser.add_argument('rest', nargs='+', metavar='Command',
                         help='TV commands to issue (try :help)')
+    return parser
+
+
+def _main(args: typing.List[str], argv0: str) -> int:
+    parser = _setup_cli_parser()
     options = parser.parse_args(args=args)
 
     config = Config(options)
@@ -527,5 +612,13 @@ if __name__ == '__main__':
         if tracer:
             tracer.results().write_results()
     sys.exit(rv)
+
+# Debugging:
+# import pathlib; __name__, __file__ = 'debug-tv', 'tv'; exec(pathlib.Path('~/tools/site/common/tv').expanduser().read_text())
+if __name__ == 'debug-tv':
+    parser = _setup_cli_parser()
+    options = parser.parse_args(args=[':help'])
+    config = Config(options)
+    remote = Remote(config)
 
 # vim: set ft=python sw=4 expandtab :
