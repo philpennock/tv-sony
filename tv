@@ -162,14 +162,12 @@ class SymKey:
         return (unpadder.update(padded) + unpadder.finalize()).encode('utf-8')
 
 
-class Config(pdpgeneric.VerboseObject):
+class Config:
     PIN_OPTION, PIN_FILEEXT = 'pin', 'pin'
     HOST_OPTION, HOST_FILEEXT = 'host', 'hostname'
 
     def __init__(self, options: argparse.Namespace) -> None:
         self.options = options
-        super().__init__()
-        self.verbose_tag_add('Config')
         # .tv is the config name as given, often 'default
         # .real_tv is the actual name, use this to write files
         self.tv = self.options.tv
@@ -180,8 +178,6 @@ class Config(pdpgeneric.VerboseObject):
             self.real_tv = self._find_real_tvname()
         else:
             self.real_tv = self.tv
-        self.verbose(f'host is {self.tv_host!r}')
-        self.verbose(f'PIN is {self.tv_pin!r}', level=9)
         self.our_rsakey: typing.Optional[cryptography.hazmat.primitives.asymmetric.rsa.RSAPublicKey] = None
         self.aes_iv: typing.Optional[bytes] = None
         self.aes_key: typing.Optional[bytes] = None
@@ -307,11 +303,9 @@ class Config(pdpgeneric.VerboseObject):
             self.save_our_private_key(self.our_rsakey)
 
 
-class Remote(pdpgeneric.VerboseObject):
+class Remote:
     def __init__(self, config: Config) -> None:
         self.options = config.options
-        super().__init__()
-        self.verbose_tag_add('Remote')
         self.config = config
         self.next_id = 1
         self.addr = config.tv_host
@@ -482,11 +476,9 @@ class Remote(pdpgeneric.VerboseObject):
     text = property(get_text_form, set_text_form, None)
 
 
-class Commander(pdpgeneric.VerboseObject):
+class Commander:
     def __init__(self, remote: Remote, commands: typing.List[str]) -> None:
         self.options = remote.options
-        super().__init__()
-        self.verbose_tag_add('Commander')
         self.remote = remote
         self.commands = commands
         self.vol_matcher = re.compile(r'^([+-])(\d+)\Z')
