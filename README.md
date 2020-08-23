@@ -193,3 +193,8 @@ Thus the default locations are:
   list of installed apps) and keep our readline history.
 * `~/.local/share/tv/` : locally generated data which should persist is stored
    here; at present, that's client RSA keys, which are not (yet?) used.
+
+## Misc
+
+The names "Sony" and "Bravia" are trademarks, used here descriptively without
+explicit permission.
