@@ -68,7 +68,7 @@ def _xdg_dir(varname: str, home_rel_default: typing.Sequence[str]) -> pathlib.Pa
         for n in home_rel_default:
             p = p / n
     else:
-        p = pathlib.Path(ps)
+        p = pathlib.Path(ps.split(os.path.pathsep)[0])
     return p / _APP_NAME
 
 
