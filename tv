@@ -721,6 +721,7 @@ class Commander:
                         sep = ' '
                 prev = k[0]
                 print(f'{sep}{k}', end='')
+            print()
             return
 
         elif command == 'danger-reboot':
@@ -778,7 +779,7 @@ class Commander:
  :encrypt-fetch  - force-fetch current TV public key
  :keys           - return list of known remote control keys for 'key' command
 If the first keycode is left-square bracket, params up until ] are all keys.
-''')
+''', end='')
             return
 
         try:
