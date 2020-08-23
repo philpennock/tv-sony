@@ -19,8 +19,10 @@ __author__ = 'phil@pennock-tech.com (Phil Pennock)'
 
 import argparse
 import base64
+import collections
 from dataclasses import dataclass
 import html
+import json
 import os
 import pathlib
 import re
@@ -38,14 +40,10 @@ import cryptography.hazmat.primitives.padding
 # Sane HTTP
 import requests
 
-try:
-    import pdpgeneric
-    def pretty_print_json(data) -> None:
-        print(pdpgeneric.colored_json(data))
-except ImportError:
-    import json
-    def pretty_print_json(data) -> None:
-        json.dumps(data, sort_keys=True, indent=2)
+if sys.stdout.isatty():
+    import pygments
+    import pygments.lexers
+    import pygments.formatters
 
 if sys.version_info < (3, 6):
     raise Exception('Need at least Python 3.6 for this tool')
@@ -98,6 +96,9 @@ class Exit(Exception):
     pass
 
 
+IRCCKeyCode = collections.namedtuple('IRCCKeyCode', ['KeyName', 'Rawcode'])
+
+
 @dataclass
 class WrapCrypto:
     backend: typing.Any = cryptography.hazmat.backends.default_backend()
@@ -126,8 +127,8 @@ Crypto = WrapCrypto()
 
 
 class SymKey:
-    AES_KEY = None
-    AES_IV = None
+    AES_KEY: typing.Optional[bytes] = None
+    AES_IV: typing.Optional[bytes] = None
 
     def __init__(self):
         if SymKey.AES_KEY is None:
@@ -163,6 +164,8 @@ class SymKey:
 
 
 class Config:
+    """Our storage system and local RSA key mgmt."""
+
     PIN_OPTION, PIN_FILEEXT = 'pin', 'pin'
     HOST_OPTION, HOST_FILEEXT = 'host', 'hostname'
 
@@ -199,6 +202,10 @@ class Config:
     @property
     def tv_keyfile(self) -> pathlib.Path:
         return _CACHE_DIR / (self.real_tv + '.tv.rsa.pub')
+
+    @property
+    def tv_ircc_codes_file(self) -> pathlib.Path:
+        return _CACHE_DIR / (self.real_tv + '.ircc-codes.json')
 
     @property
     def our_public_keyfile(self) -> pathlib.Path:
@@ -302,8 +309,27 @@ class Config:
             self.save_our_public_key(self.our_rsakey)
             self.save_our_private_key(self.our_rsakey)
 
+    def load_ircc_codes(self) -> typing.Dict:
+        bare = json.load(open(self.tv_ircc_codes_file))
+        typed: typing.Dict[str, IRCCKeyCode] = {}
+        for k, p in bare.items():
+            typed[k] = IRCCKeyCode(*p)
+        return typed
+
+    def save_ircc_codes(self, jdata: typing.Dict) -> None:
+        with self.tv_ircc_codes_file.open('w') as wh:
+            # sort to make git and diff saner, if we move from cache
+            json.dump(jdata, wh, indent=1, sort_keys=True)
+
 
 class Remote:
+    """Talking to the TV via various protocols.
+
+    Most of the stuff is REST API, but anything which is directly emulating a
+    remote control is IRCC-IP (InfraRed Compatible Control over Internet Protocol),
+    using SOAP XML.
+    """
+
     def __init__(self, config: Config) -> None:
         self.options = config.options
         self.config = config
@@ -311,8 +337,17 @@ class Remote:
         self.addr = config.tv_host
         self.pin = config.tv_pin
         self._tv_pubkey_b64: typing.Optional[str] = None
-        self._tv_pubkey_bin: typing.Optional[bytes]= None
+        self._tv_pubkey_bin: typing.Optional[bytes] = None
+        self._ircc_dict: typing.Optional[typing.Dict] = None
         self._setup_requests()
+
+    def verbosity(self, n: int = 1) -> bool:
+        return True if self.options.verbose >= n else False
+
+    def verbose(self, message: str, level=1) -> None:
+        if self.options.verbose < level:
+            return
+        print('[remote] '+message, file=sys.stderr, flush=True)
 
     def _setup_requests(self) -> None:
         self.session = requests.Session()
@@ -328,21 +363,27 @@ class Remote:
             'params': [params] if params else [],
         }
         self.next_id += 1
-        if self.options.verbose >= 3:
-            print(f'POST <{url}> ', end='')
+        if self.verbosity(3):
+            print(f'> POST <{url}> ', end='')
             pretty_print_json(payload_d)
-        elif self.options.verbose >= 2:
+        elif self.verbosity(2):
             print(f' >> {service} / {method}')
         r = self.session.post(url, json=payload_d)
         return r
 
     def send(self, service: str, method: str, params: typing.Dict, **kwargs) -> None:
         r = self._send(service, method, params, **kwargs)
-        if self.options.verbose:
+        if self.verbosity():
             pretty_print_json(r.json())
 
     def query(self, service: str, method: str, params: typing.Dict, **kwargs) -> typing.Dict:
-        return self._send(service, method, params, **kwargs).json()
+        res = self._send(service, method, params, **kwargs)
+        if self.verbosity(3):
+            print(f'< {res.status_code} {res.reason}')
+            if self.verbosity(4):
+                pretty_print_json(dict(res.headers))
+            pretty_print_json(res.json())
+        return res.json()
 
     def check_error(self, label: str, result: typing.Dict) -> None:
         if 'error' not in result:
@@ -442,6 +483,8 @@ class Remote:
         else:
             kd = self.query('encryption', 'getPublicKey', {})
             self._tv_pubkey_b64 = kd['result'][0]['publicKey']
+            if not self._tv_pubkey_b64:
+                raise Exit('TV gave us an empty public key')
             if not self.config.tv_keyfile.parent.exists():
                 self.config.tv_keyfile.parent.mkdir(0o700)
             self.config.tv_keyfile.write_text(self._tv_pubkey_b64 + '\n')
@@ -451,13 +494,15 @@ class Remote:
     def tv_pubkey(self) -> cryptography.hazmat.primitives.asymmetric.rsa.RSAPublicKey:
         if self._tv_pubkey_bin is None:
             self.setup_encryption(tv_only=True)
+            if self._tv_pubkey_bin is None:
+                raise Error('still no pubkey bin after setting up encryption')
         return self.config.load_pubkey_bin(self._tv_pubkey_bin)
 
     def get_text_form(self) -> str:
         key = SymKey()
-        x = key.encKey(self.tv_pubkey)
+        encKey = key.encKey(self.tv_pubkey)
         res = self.query('appControl', 'getTextForm', {
-            'encKey': key.encKey(self.tv_pubkey),
+            'encKey': encKey,
         }, api_version='1.1')
         self.check_error('get_text_form', res)
         encText = res['result'][0]['text']
@@ -475,8 +520,79 @@ class Remote:
 
     text = property(get_text_form, set_text_form, None)
 
+    def _send_ircc_rawcode(self, rawcode: str) -> None:
+        # <https://pro-bravia.sony.net/develop/integrate/ircc-ip/overview/index.html>
+        url = f'http://{self.addr}/sony/ircc'
+        soap_headers = {
+            'Content-Type': 'text/xml; charset=UTF-8',
+            'SOAPACTION': '"urn:schemas-sony-com:service:IRCC:1#X_SendIRCC"'
+        }
+        soap_payload_template = '''<s:Envelope
+    xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+    s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+    <s:Body>
+        <u:X_SendIRCC xmlns:u="urn:schemas-sony-com:service:IRCC:1">
+            <IRCCCode>{0}</IRCCCode>
+        </u:X_SendIRCC>
+    </s:Body>
+</s:Envelope>
+'''
+        self.verbose(f'_send_ircc_rawcode: SOAP IRCCCode {rawcode}', level=4)
+        r = self.session.post(url,
+                              data=soap_payload_template.format(rawcode),
+                              headers=soap_headers)
+        r.raise_for_status()
+        return r
+
+    def _setup_ircc(self):
+        if self._ircc_dict is not None:
+            return
+        try:
+            self._ircc_dict = self.config.load_ircc_codes()
+            return
+        except FileNotFoundError:
+            pass
+        r = self.query('system', 'getRemoteControllerInfo', {})
+        self.check_error('getRemoteControllerInfo', r)
+        # Ideally we'd have a handy case-insensitive dict, so we could store
+        # preserving the capitalization but not worry for command entry.
+        #
+        # result[0] is deprecated; result[1] is list of objs, each with 'name' and 'value' keys
+        codes = {}
+        for pair in r['result'][1]:
+            kp = pair['name']
+            k = kp.lower()
+            v = pair['value']
+            if k in codes:
+                self.verbose(f'duplicate IRCC code for {kp!r}: had: {codes[k]} also: {v}')
+                continue
+            codes[k] = IRCCKeyCode(kp, v)
+        self.config.save_ircc_codes(codes)
+        self._ircc_dict = codes
+
+    def key(self, keyname: str) -> None:
+        self._setup_ircc()
+
+        # Why Num 0-9,11,12 ?  Where's the love for 10?
+        if len(keyname) == 1 and keyname.isdigit() or keyname in ('Num11', 'Num12',):
+            keyname = 'Num' + keyname
+        lk = keyname.lower()
+
+        if lk not in self._ircc_dict:
+            raise Exit(f'unknown keycode {keyname!r}')
+        self._send_ircc_rawcode(self._ircc_dict[lk].Rawcode)
+
+    def known_keys(self) -> typing.List[str]:
+        self._setup_ircc()
+        keylist = [None] * len(self._ircc_dict)
+        for i, k in enumerate(self._ircc_dict.keys()):
+            keylist[i] = self._ircc_dict[k].KeyName
+        return sorted(keylist)
+
 
 class Commander:
+    """Command interpreter."""
+
     def __init__(self, remote: Remote, commands: typing.List[str]) -> None:
         self.options = remote.options
         self.remote = remote
@@ -504,8 +620,15 @@ class Commander:
             raise Exit('can only set volume to absolute 0..100')
         self.remote.volume = str(ivol)
 
+    _command_typos = {
+        'hmdi': 'hdmi',
+    }
+
     def one(self, command: str) -> None:
         remote = self.remote
+        if command in self._command_typos:
+            print(f'tv: typo fixup: {command!r} -> {self._command_typos[command]!r}', file=sys.stderr)
+            command = self._command_typos[command]
         if command == 'on':
             remote.power = True
             return
@@ -568,6 +691,38 @@ class Commander:
                 print(spec.format(**inp))
             return
 
+        elif command == 'key':
+            keycode = self.next('keycode')
+            pause = False
+            if keycode != '[':
+                remote.key(keycode)
+                return
+            while keycode != ']':
+                try:
+                    keycode = self.commands.pop(0)
+                    if keycode == ']':
+                        break
+                except IndexError:
+                    return
+                if pause:
+                    time.sleep(0.25)
+                remote.key(keycode)
+                pause = True
+            return
+        elif command == ':keys':
+            keylist = remote.known_keys()
+            prev = None
+            sep = ''
+            for k in keylist:
+                if prev is not None:
+                    if k[0] != prev:
+                        sep = '\n'
+                    else:
+                        sep = ' '
+                prev = k[0]
+                print(f'{sep}{k}', end='')
+            return
+
         elif command == 'danger-reboot':
             remote.reboot()
             return
@@ -604,10 +759,12 @@ class Commander:
 
         elif command in ('help', '?help', ':help'):
             print('''tv: <one or more commands>
- on       off           ?power
- mute     unmute
- vol +n   vol -n        vol NN      ?vol
- hdmi N   composite N   scart N
+ on          off             ?power
+ mute        unmute
+ vol +n      vol -n          vol NN      ?vol
+ hdmi N      composite N     scart N
+(read-text   write-text TXT) -- BROKEN
+ key KEY     key [ KEY KEY KEY ... ]
  list-inputs
  list-apps       - list installed applications
  app NAME        - launch app NAME
@@ -619,6 +776,8 @@ class Commander:
  :default TVNAME - switch default TV to TVNAME (must exist)
  :encrypt-setup  - immediately setup encryption
  :encrypt-fetch  - force-fetch current TV public key
+ :keys           - return list of known remote control keys for 'key' command
+If the first keycode is left-square bracket, params up until ] are all keys.
 ''')
             return
 
@@ -638,6 +797,22 @@ class Commander:
             else:
                 is_subsequent = True
             self.one(self.next('').lower())
+
+
+if sys.stdout.isatty():
+    _pp_lexer = pygments.lexers.JsonLexer()
+    _pp_formatter = pygments.formatters.TerminalFormatter()
+
+    def pretty_print_json(data, stream=None) -> None:
+        if stream is None:
+            stream = sys.stdout
+        laid_out = json.dumps(data, sort_keys=True, indent=2)
+        print(pygments.highlight(laid_out, _pp_lexer, _pp_formatter), file=stream)
+else:
+    def pretty_print_json(data, stream=None) -> None:
+        if stream is None:
+            stream = sys.stdout
+        print(json.dumps(data, sort_keys=True, indent=2), file=stream)
 
 
 def _setup_cli_parser() -> argparse.ArgumentParser:
