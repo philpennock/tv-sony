@@ -202,6 +202,7 @@ class Config:
         self.our_rsakey: typing.Optional[cryptography.hazmat.primitives.asymmetric.rsa.RSAPublicKey] = None
         self.aes_iv: typing.Optional[bytes] = None
         self.aes_key: typing.Optional[bytes] = None
+        self.max_age_app_cache = 24 * 3600
 
     def derive_field(self, optname: str, base: str) -> str:
         t = getattr(self.options, optname)
@@ -232,6 +233,10 @@ class Config:
     @property
     def readline_history(self) -> pathlib.Path:
         return _CACHE_DIR / (self.real_tv + '.readline.history')
+
+    @property
+    def app_list_file(self) -> pathlib.Path:
+        return _CACHE_DIR / (self.real_tv + '.apps.json')
 
     @property
     def our_public_keyfile(self) -> pathlib.Path:
@@ -704,7 +709,12 @@ class Commander:
         key_commands = self.remote.known_keys()
         self._key_completions = sorted(key_commands)
 
-        app_names = self.remote.list_apps()
+        app_cache = self.remote.config.app_list_file
+        if app_cache.exists() and (time.time() - app_cache.stat().st_mtime) < self.remote.config.max_age_app_cache:
+            app_names = json.load(app_cache.open())
+        else:
+            app_names = self.remote.list_apps()
+            json.dump(app_names, app_cache.open('w'), indent=1, sort_keys=True)
         self._app_completions = sorted(app_names)
 
         # The MapSubCommands third item in the tuple is to let us walk down so a third level
