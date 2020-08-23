@@ -9,14 +9,26 @@ The Sony TV has a JSON REST-ish RPC interface.
 __author__ = 'phil@pennock-tech.com (Phil Pennock)'
 
 import argparse
+import html
 import os
 import pathlib
 import re
+import shlex
 import sys
 import time
 import typing
 
 import requests
+
+try:
+    import pdpgeneric
+    def pretty_print_json(data) -> None:
+        print(pdpgeneric.colored_json(data))
+except ImportError:
+    import json
+    def pretty_print_json(data) -> None:
+        json.dumps(data, sort_keys=True, indent=2)
+
 
 # Beware that digits on the remote do not enter ASCII digits but some other unicode digits
 TV_PIN_FILE = os.path.expanduser('~/.config/pdp/tv-pin')
@@ -58,43 +70,127 @@ class Remote:
         self.session.headers['User-Agent'] = DEF_USERAGENT
         self.session.headers['X-Auth-PSK'] = self.pin
 
-    def send(self, service: str, method: str, params: typing.Dict) -> None:
+    def _send(self, service: str, method: str, params: typing.Dict, *, api_version='1.0'):
         url = f'http://{self.addr}/sony/{service}'
         payload_d = {
             'method': method,
-            'version': '1.0',
+            'version': api_version,
             'id': self.next_id,
             'params': [params] if params else [],
         }
         self.next_id += 1
-        if self.options.verbose >= 2:
+        if self.options.verbose >= 3:
+            print(f'POST <{url}> ', end='')
+            pretty_print_json(payload_d)
+        elif self.options.verbose >= 2:
             print(f' >> {service} / {method}')
         r = self.session.post(url, json=payload_d)
+        return r
+
+    def send(self, service: str, method: str, params: typing.Dict, **kwargs) -> None:
+        r = self._send(service, method, params, **kwargs)
         if self.options.verbose:
-            print(r.json())
+            pretty_print_json(r.json())
+
+    def query(self, service: str, method: str, params: typing.Dict, **kwargs) -> typing.Dict:
+        return self._send(service, method, params, **kwargs).json()
+
+    # <https://pro-bravia.sony.net/develop/integrate/rest-api/spec/>
+    KNOWN_SERVICES = 'guide appControl audio avContent encryption system videoScreen'.split()
+
+    def _get_power(self) -> str:
+        resp = self.query('system', 'getPowerStatus', {})
+        return resp['result'][0]['status']
 
     def _set_power(self, power_state: bool) -> None:
         self.send('system', 'setPowerStatus', {'status': power_state})
-    power = property(None, _set_power, None)
+
+    power = property(_get_power, _set_power, None)
 
     def _set_mute(self, mute_state: bool) -> None:
         self.send('audio', 'setAudioMute', {'status': mute_state})
+
     mute = property(None, _set_mute, None)
 
+    # this is paired with :playing, query_playing_content_info()
+    # might build a map of uris to labels and try to simplify through that, for a better reader?
     def set_external_input(self, kind: str, port: str) -> None:
         uri = f'extInput:{kind}?port={port}'
         self.send('avContent', 'setPlayContent', {'uri': uri})
 
+    def _get_volume(self) -> typing.List[typing.Dict]:
+        resp = self.query('audio', 'getVolumeInformation', {})
+        return resp['result'][0]
+
     def _set_volume(self, new_volume: str) -> None:
+        # api 1.2 lets us control if the on-screen volume UI should be displayed; stick to 1.0, accept UI defaults
         self.send('audio', 'setAudioVolume', {'target': 'speaker', 'volume': new_volume})
-    volume = property(None, _set_volume, None)
+
+    volume = property(_get_volume, _set_volume, None)
+
+    def reboot(self) -> None:
+        self.send('system', 'requestReboot', {})
+
+    def list_apps(self) -> typing.List[str]:
+        apps = self.query('appControl', 'getApplicationList', {})
+        return [html.unescape(x['title']) for x in apps['result'][0]]
+
+    def launch_app(self, appname: str) -> None:
+        needle = appname.lower()
+        res = self.query('appControl', 'getApplicationList', {})
+        filtered = [app for app in res['result'][0] if html.unescape(app['title']).lower() == needle]
+        if not filtered:
+            raise Exit(f'unknown app {appname!r}')
+        if len(filtered) > 1:
+            applist = ', '.join(map(lambda x: shlex.quote(html.unescape(x['title'])), filtered))
+            raise Exit(f'too many apps found for {appname!r}: {applist}')
+        uri = filtered[0]['uri']
+        self.send('appControl', 'setActiveApp', {'uri': uri})
+
+    def list_inputs(self) -> typing.List[typing.Dict]:
+        inputs = self.query('avContent', 'getCurrentExternalInputsStatus', {}, api_version='1.1')
+        return inputs['result'][0]
+
+    # All methods with names starting 'query_' are directly exposed by the
+    # Commander as debug commands, specified with a leading colon,
+    # thus `tv :query_time` works.
+
+    def query_supported_apis(self) -> None:
+        pretty_print_json(self.query('guide', 'getSupportedApiInfo', {'services': Remote.KNOWN_SERVICES}))
+
+    def query_time(self) -> None:
+        pretty_print_json(self.query('system', 'getCurrentTime', {}, api_version='1.1'))
+
+    def query_network_settings(self) -> None:
+        # We shouldn't need netif per the spec, but we get "Illegal Argument" without it
+        pretty_print_json(self.query('system', 'getNetworkSettings', {'netif': ''}))
+
+    def query_interface_information(self) -> None:
+        pretty_print_json(self.query('system', 'getInterfaceInformation', {})['result'][0])
+
+    def query_sound_settings(self) -> None:
+        # Array, one for each target
+        pretty_print_json(self.query('audio', 'getSoundSettings', {'target': ''}, api_version='1.1')['result'][0])
+
+    def query_speaker_settings(self) -> None:
+        # Array, one for each target
+        pretty_print_json(self.query('audio', 'getSpeakerSettings', {'target': ''})['result'][0])
+
+    def query_playing_content_info(self) -> None:
+        pretty_print_json(self.query('avContent', 'getPlayingContentInfo', {})['result'][0])
 
 
 class Commander:
-    def __init__(self, remote: Remote, commands: typing.Sequence[str]) -> None:
+    def __init__(self, remote: Remote, commands: typing.List[str]) -> None:
         self.remote = remote
         self.commands = commands
         self.vol_matcher = re.compile(r'^([+-])(\d+)\Z')
+
+    def next(self, previous: str) -> str:
+        try:
+            return self.commands.pop(0)
+        except IndexError:
+            raise Exit(f'parameter needed for command {previous!r}')
 
     def volume(self, spec: str, allow_absolute: bool) -> None:
         m = self.vol_matcher.match(spec)
@@ -119,6 +215,9 @@ class Commander:
         elif command == 'off':
             remote.power = False
             return
+        elif command in ('power', '?power'):
+            print(remote.power)
+            return
         elif command == 'mute':
             remote.mute = True
             return
@@ -127,13 +226,79 @@ class Commander:
             return
         elif command in ('hdmi', 'composite', 'scart'):
             try:
-                port = str(int(self.commands.pop(0)))
-            except Exception:
+                port = str(int(self.next(command)))
+            except Exit:
                 raise Exit(f'command {command} needs a port (1..4)')
+            # The actual limit might happen to be 4, but if we want to
+            # _enforce_ then don't hard-code;
+            # remote.send('avContent', 'getContentCount', {'source': 'extInput:hdmi'})
+            # _should_ give us r['result'][0]['count']; I don't want an extra
+            # RPC call for static data, so instead punt on enforcing this until
+            # such time as we suck it up and build a capabilities cache in XDG
+            # storage.
             remote.set_external_input(command, port)
             return
         elif command in ('vol', 'volume'):
-            self.volume(self.commands.pop(0), True)
+            self.volume(self.next(command), True)
+            return
+        elif command in ('get-vol', 'get-volume', '?vol', '?volume'):
+            pretty_print_json(remote.volume)
+            return
+        elif command == 'app':
+            remote.launch_app(self.next(command))
+            return
+
+        elif command in ('apps', '?apps', 'list-apps'):
+            for app in sorted(remote.list_apps()):
+                print(f' • {app}')
+            return
+        elif command in ('list-inputs', '?inputs'):
+            maxlen_title, maxlen_label = 1, 1
+            for inp in remote.list_inputs():
+                tl, ll = len(inp['title']), len(inp['label'])
+                if tl > maxlen_title:
+                    maxlen_title = tl
+                if ll > maxlen_label:
+                    maxlen_label = ll
+            spec = '{title:<%d}  {label:<%d}  {uri}' % (maxlen_title, maxlen_label)
+            for inp in remote.list_inputs():
+                print(spec.format(**inp))
+            return
+
+        elif command == 'danger-reboot':
+            remote.reboot()
+            return
+
+        # Keep :foo for internals and debug
+        elif command == ':about':
+            remote.query_interface_information()
+            return
+        elif command == ':playing':
+            remote.query_playing_content_info()
+            return
+        elif command.startswith(':query_') and hasattr(remote, command[1:]):
+            getattr(remote, command[1:])()
+            return
+        elif command == ':query':
+            known = [x for x in dir(remote) if x.startswith('query_')]
+            for cmd in sorted(known):
+                print(':', cmd, sep='')
+            return
+
+        elif command in ('help', '?help', ':help'):
+            print('''tv: <one or more commands>
+ on       off           ?power
+ mute     unmute
+ vol +n   vol -n        vol NN      ?vol
+ hdmi N   composite N   scart N
+ list-inputs
+ list-apps       - list installed applications
+ app NAME        - launch app NAME
+ danger-reboot   - reboots the TV
+ :about          - basic information about the TV
+ :playing        - current input source
+ :query          - list various :query_* debug commands
+''')
             return
 
         try:
@@ -151,7 +316,7 @@ class Commander:
                 time.sleep(0.5)
             else:
                 is_subsequent = True
-            self.one(self.commands.pop(0).lower())
+            self.one(self.next('').lower())
 
 
 def _main(args: typing.List[str], argv0: str) -> int:
@@ -167,7 +332,8 @@ def _main(args: typing.List[str], argv0: str) -> int:
     parser.add_argument('-v', '--verbose',
                         action='count', default=0,
                         help='Be more verbose')
-    parser.add_argument('rest', nargs='+')
+    parser.add_argument('rest', nargs='+', metavar='Command',
+                        help='TV commands to issue (try :help)')
     options = parser.parse_args(args=args)
 
     if options.pin:
@@ -178,6 +344,8 @@ def _main(args: typing.List[str], argv0: str) -> int:
 
     commander = Commander(remote, options.rest)
     commander.loop()
+    return 0
+
 
 if __name__ == '__main__':
     argv0 = pathlib.Path(sys.argv[0]).name
