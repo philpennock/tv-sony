@@ -1188,6 +1188,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
 
         status_coords = (1+pad_max_y, 3)
         screen.move(*status_coords)
+        screen.deleteln()
 
         try:
             prior_cursor = curses.curs_set(0)
