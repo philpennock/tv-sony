@@ -24,6 +24,7 @@ import html
 import os
 import pathlib
 import re
+import secrets
 import shlex
 import sys
 import time
@@ -31,7 +32,9 @@ import typing
 
 # TV can encrypt text strings, which we want for sending/reading passwords in app prompts
 import cryptography.hazmat.backends
-import cryptography.hazmat.primitives.asymmetric.rsa
+import cryptography.hazmat.primitives
+import cryptography.hazmat.primitives.padding
+# import cryptography.hazmat.primitives.asymmetric.rsa
 # Sane HTTP
 import requests
 
@@ -95,6 +98,70 @@ class Exit(Exception):
     pass
 
 
+@dataclass
+class WrapCrypto:
+    backend: typing.Any = cryptography.hazmat.backends.default_backend()
+    DER: typing.Any = cryptography.hazmat.primitives.serialization.Encoding.DER
+    PEM: typing.Any = cryptography.hazmat.primitives.serialization.Encoding.PEM
+    PKCS1: typing.Any = cryptography.hazmat.primitives.serialization.PublicFormat.PKCS1
+    PKCS7: typing.Any = cryptography.hazmat.primitives.padding.PKCS7
+    PKCS8: typing.Any = cryptography.hazmat.primitives.serialization.PrivateFormat.PKCS8
+    SPKI: typing.Any = cryptography.hazmat.primitives.serialization.PublicFormat.SubjectPublicKeyInfo
+    AES: typing.Any = cryptography.hazmat.primitives.ciphers.algorithms.AES
+    CBC: typing.Any = cryptography.hazmat.primitives.ciphers.modes.CBC
+    PKCS1v15: typing.Any = cryptography.hazmat.primitives.asymmetric.padding.PKCS1v15
+    PrivateRaw: typing.Any = cryptography.hazmat.primitives.serialization.PrivateFormat.Raw
+    Cipher: typing.Any = cryptography.hazmat.primitives.ciphers.Cipher
+    # NoEncryption apparently does not satisfy KeySerializationEncryption
+    # I want one fixed serialization type so I can safely load, but
+    # cryptography only lets me have access to the mutable curated choice.
+    BestAvailableEncryption: typing.Any = cryptography.hazmat.primitives.serialization.BestAvailableEncryption
+    want_exponent: int = 65537
+    want_keysize: int = 2048
+    AES_BLOCKSIZE_BITS: int = 128
+    AES_BLOCKSIZE_U8: int = 16
+
+
+Crypto = WrapCrypto()
+
+
+class SymKey:
+    AES_KEY = None
+    AES_IV = None
+
+    def __init__(self):
+        if SymKey.AES_KEY is None:
+            SymKey.AES_KEY = secrets.token_bytes(Crypto.AES_BLOCKSIZE_U8)
+        if SymKey.AES_IV is None:
+            SymKey.AES_IV = secrets.token_bytes(Crypto.AES_BLOCKSIZE_U8)
+        self.aes_key = SymKey.AES_KEY
+        self.aes_iv = SymKey.AES_IV
+        SymKey.AES_IV = (int.from_bytes(SymKey.AES_IV, byteorder='big') + 1).to_bytes(Crypto.AES_BLOCKSIZE_U8, byteorder='big')
+        self.cipher = Crypto.Cipher(Crypto.AES(self.aes_key), Crypto.CBC(self.aes_iv), backend=Crypto.backend)
+
+    def common_key(self) -> bytes:
+        return self.aes_key + b':' + self.aes_iv
+
+    def encKey(self, pubKey: cryptography.hazmat.primitives.asymmetric.rsa.RSAPublicKey) -> str:
+        return base64.b64encode(pubKey.encrypt(
+            self.common_key(),
+            Crypto.PKCS1v15(),
+        )).decode('ASCII')
+
+    def encrypt(self, data: str) -> str:
+        padder = Crypto.PKCS7(Crypto.AES_BLOCKSIZE_BITS).padder()
+        padded = padder.update(data.encode('utf-8'))
+        padded += padder.finalize()
+        enc = self.cipher.encryptor()
+        return base64.b64encode(enc.update(padded) + enc.finalize()).decode('ASCII')
+
+    def decrypt(self, data: str) -> str:
+        dec = self.cipher.decryptor()
+        padded = dec.update(data) + dec.finalize()
+        unpadder = Crypto.PKCS7(Crypto.AES_BLOCKSIZE_BITS).unpadder()
+        return (unpadder.update(padded) + unpadder.finalize()).encode('utf-8')
+
+
 class Config(pdpgeneric.VerboseObject):
     PIN_OPTION, PIN_FILEEXT = 'pin', 'pin'
     HOST_OPTION, HOST_FILEEXT = 'host', 'hostname'
@@ -115,7 +182,9 @@ class Config(pdpgeneric.VerboseObject):
             self.real_tv = self.tv
         self.verbose(f'host is {self.tv_host!r}')
         self.verbose(f'PIN is {self.tv_pin!r}', level=9)
-        self.our_rsakey = None
+        self.our_rsakey: typing.Optional[cryptography.hazmat.primitives.asymmetric.rsa.RSAPublicKey] = None
+        self.aes_iv: typing.Optional[bytes] = None
+        self.aes_key: typing.Optional[bytes] = None
 
     def derive_field(self, optname: str, base: str) -> str:
         t = getattr(self.options, optname)
@@ -187,35 +256,17 @@ class Config(pdpgeneric.VerboseObject):
                 src.unlink()
             src.symlink_to(dest.name)
 
-    @dataclass
-    class WrapCrypto:
-        backend: typing.Any = cryptography.hazmat.backends.default_backend()
-        DER: typing.Any = cryptography.hazmat.primitives.serialization.Encoding.DER
-        PEM: typing.Any = cryptography.hazmat.primitives.serialization.Encoding.PEM
-        PKCS1: typing.Any = cryptography.hazmat.primitives.serialization.PublicFormat.PKCS1
-        PKCS8: typing.Any = cryptography.hazmat.primitives.serialization.PrivateFormat.PKCS8
-        SPKI: typing.Any = cryptography.hazmat.primitives.serialization.PublicFormat.SubjectPublicKeyInfo
-        PrivateRaw: typing.Any = cryptography.hazmat.primitives.serialization.PrivateFormat.Raw
-        # NoEncryption apparently does not satisfy KeySerializationEncryption
-        # I want one fixed serialization type so I can safely load, but
-        # cryptography only lets me have access to the mutable curated choice.
-        BestAvailableEncryption: typing.Any = cryptography.hazmat.primitives.serialization.BestAvailableEncryption
-        want_exponent: int = 65537
-        want_keysize: int = 2048
-
-    Crypto = WrapCrypto()
-
     def load_pubkey_b64(self, b64data: str) -> cryptography.hazmat.primitives.asymmetric.rsa.RSAPublicKey:
-        return self.load_pubkey_bin(self, base64.b64decode(b64data, validate=True))
+        return self.load_pubkey_bin(base64.b64decode(b64data, validate=True))
 
-    def load_pubkey_bin(self, bindata: str) -> cryptography.hazmat.primitives.asymmetric.rsa.RSAPublicKey:
-        return cryptography.hazmat.primitives.serialization.load_der_public_key(bindata, backend=self.Crypto.backend)
+    def load_pubkey_bin(self, bindata: bytes) -> cryptography.hazmat.primitives.asymmetric.rsa.RSAPublicKey:
+        return cryptography.hazmat.primitives.serialization.load_der_public_key(bindata, backend=Crypto.backend)
 
     def make_rsa_key(self) -> cryptography.hazmat.primitives.asymmetric.rsa.RSAPrivateKey:
         return cryptography.hazmat.primitives.asymmetric.rsa.generate_private_key(
-            public_exponent=self.Crypto.want_exponent,
-            key_size=self.Crypto.want_keysize,
-            backend=self.Crypto.backend)
+            public_exponent=Crypto.want_exponent,
+            key_size=Crypto.want_keysize,
+            backend=Crypto.backend)
 
     def write_file(self, fpath: pathlib.Path, data: bytes) -> None:
         if not fpath.parent.exists():
@@ -232,16 +283,16 @@ class Config(pdpgeneric.VerboseObject):
         self.write_file(
             self.our_private_keyfile,
             rsakey.private_bytes(
-                encoding=self.Crypto.PEM,
-                format=self.Crypto.PKCS8,
-                encryption_algorithm=self.Crypto.BestAvailableEncryption(PRIVATE_KEY_PASSWORD)),
+                encoding=Crypto.PEM,
+                format=Crypto.PKCS8,
+                encryption_algorithm=Crypto.BestAvailableEncryption(PRIVATE_KEY_PASSWORD)),
         )
 
     def save_our_public_key(self, rsakey: cryptography.hazmat.primitives.asymmetric.rsa.RSAPrivateKey) -> None:
         # We don't use this ourselves, we do this so that other tooling can look at it if wanted.
         self.write_file(
             self.our_public_keyfile,
-            rsakey.public_key().public_bytes(self.Crypto.PEM, self.Crypto.PKCS1),
+            rsakey.public_key().public_bytes(Crypto.PEM, Crypto.PKCS1),
         )
 
     def setup_thisremote_encryption(self, force_new_remote_key=False) -> None:
@@ -249,7 +300,7 @@ class Config(pdpgeneric.VerboseObject):
             self.our_rsakey = cryptography.hazmat.primitives.serialization.load_pem_private_key(
                 self.our_private_keyfile.read_bytes(),
                 password=PRIVATE_KEY_PASSWORD,
-                backend=self.Crypto.backend)
+                backend=Crypto.backend)
         else:
             self.our_rsakey = self.make_rsa_key()
             self.save_our_public_key(self.our_rsakey)
@@ -265,8 +316,8 @@ class Remote(pdpgeneric.VerboseObject):
         self.next_id = 1
         self.addr = config.tv_host
         self.pin = config.tv_pin
-        self._tv_pubkey_b64 = None
-        self._tv_pubkey_bin = None
+        self._tv_pubkey_b64: typing.Optional[str] = None
+        self._tv_pubkey_bin: typing.Optional[bytes]= None
         self._setup_requests()
 
     def _setup_requests(self) -> None:
@@ -298,6 +349,12 @@ class Remote(pdpgeneric.VerboseObject):
 
     def query(self, service: str, method: str, params: typing.Dict, **kwargs) -> typing.Dict:
         return self._send(service, method, params, **kwargs).json()
+
+    def check_error(self, label: str, result: typing.Dict) -> None:
+        if 'error' not in result:
+            return
+        code, message = result['error'][:2]
+        raise Exit(f'failed in {label}: code {code} message: {message}')
 
     # <https://pro-bravia.sony.net/develop/integrate/rest-api/spec/>
     KNOWN_SERVICES = 'guide appControl audio avContent encryption system videoScreen'.split()
@@ -387,7 +444,7 @@ class Remote(pdpgeneric.VerboseObject):
         if not tv_only:
             self.config.setup_thisremote_encryption(**kwargs)
         if self.config.tv_keyfile.exists() and not force_fetch:
-            self._tv_pubkey_b64 = self.config.tv_keyfile.read_bytes().strip()
+            self._tv_pubkey_b64 = self.config.tv_keyfile.read_text().strip()
         else:
             kd = self.query('encryption', 'getPublicKey', {})
             self._tv_pubkey_b64 = kd['result'][0]['publicKey']
@@ -397,10 +454,32 @@ class Remote(pdpgeneric.VerboseObject):
         self._tv_pubkey_bin = base64.b64decode(self._tv_pubkey_b64, validate=True)
 
     @property
-    def tv_pubkey(self) -> bytes:
+    def tv_pubkey(self) -> cryptography.hazmat.primitives.asymmetric.rsa.RSAPublicKey:
         if self._tv_pubkey_bin is None:
             self.setup_encryption(tv_only=True)
         return self.config.load_pubkey_bin(self._tv_pubkey_bin)
+
+    def get_text_form(self) -> str:
+        key = SymKey()
+        x = key.encKey(self.tv_pubkey)
+        res = self.query('appControl', 'getTextForm', {
+            'encKey': key.encKey(self.tv_pubkey),
+        }, api_version='1.1')
+        self.check_error('get_text_form', res)
+        encText = res['result'][0]['text']
+        return key.decrypt(encText)
+
+    def set_text_form(self, newText: str) -> None:
+        key = SymKey()
+        res = self.query('appControl', 'setTextForm', {
+            'text': key.encrypt(newText),
+            'encKey': key.encKey(self.tv_pubkey),
+        }, api_version='1.1')
+        self.check_error('set_text_form', res)
+        if 'result' not in res:
+            raise Error('missing result (expected empty but present) in set_text_form response')
+
+    text = property(get_text_form, set_text_form, None)
 
 
 class Commander(pdpgeneric.VerboseObject):
@@ -469,6 +548,12 @@ class Commander(pdpgeneric.VerboseObject):
             return
         elif command in ('get-vol', 'get-volume', '?vol', '?volume'):
             pretty_print_json(remote.volume)
+            return
+        elif command in ('read', 'read-text'):
+            print(remote.text)
+            return
+        elif command in ('write', 'write-text', 'send-text'):
+            remote.text = self.next(command)
             return
         elif command == 'app':
             remote.launch_app(self.next(command))
