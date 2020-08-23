@@ -143,8 +143,9 @@ class Config(pdpgeneric.VerboseObject):
     def our_private_keyfile(self) -> pathlib.Path:
         return _DATA_DIR / 'our.rsa.private'
 
-    def persist_current(self) -> None:
-        write_name = self.options.new_tvname if self.options.new_tvname else self.real_tv
+    def persist_current(self, new_tvname: str) -> None:
+        # A name of '' will write out to current
+        write_name = new_tvname if new_tvname else self.real_tv
         forbidden = [os.path.sep, os.path.pathsep]
         if os.path.extsep:
             forbidden += [os.path.extsep]
@@ -156,8 +157,6 @@ class Config(pdpgeneric.VerboseObject):
         if not _CONFIG_DIR.exists():
             _CONFIG_DIR.mkdir(mode=0o700, parents=True)
 
-        default_pin_file = _CONFIG_DIR / (_DEFAULT_TV + '.' + Config.PIN_FILEEXT)
-        default_host_file = _CONFIG_DIR / (_DEFAULT_TV + '.' + Config.HOST_FILEEXT)
         if write_name == _DEFAULT_TV:
             write_name = _DEFAULT_TV + '-real'
         pin_file = _CONFIG_DIR / (write_name + '.' + Config.PIN_FILEEXT)
@@ -168,12 +167,23 @@ class Config(pdpgeneric.VerboseObject):
                 f.unlink()
             f.touch(mode=0o600, exist_ok=False)
             f.write_text(content + '\n', encoding='utf-8')
+        self.set_default_tv(write_name)
+
+    def set_default_tv(self, target_tvname: str) -> None:
         # We have no locking here, so not safe against a concurrent reader.
         # For myself now, I don't currently care.
+        default_pin_file = _CONFIG_DIR / (_DEFAULT_TV + '.' + Config.PIN_FILEEXT)
+        default_host_file = _CONFIG_DIR / (_DEFAULT_TV + '.' + Config.HOST_FILEEXT)
+        pin_file = _CONFIG_DIR / (target_tvname + '.' + Config.PIN_FILEEXT)
+        host_file = _CONFIG_DIR / (target_tvname + '.' + Config.HOST_FILEEXT)
+        if not pin_file.exists():
+            raise Exit(f"can't repoint default TV to {target_tvname!r}, missing {pin_file.name!r}")
+        if not host_file.exists():
+            raise Exit(f"can't repoint default TV to {target_tvname!r}, missing {host_file.name!r}")
         for src, dest in [(default_pin_file, pin_file), (default_host_file, host_file)]:
             if src.exists() and not src.is_symlink():
                 src.rename(src.with_suffix('.old' + src.suffix))
-            if src.exists():
+            if src.exists() or src.is_symlink():
                 src.unlink()
             src.symlink_to(dest.name)
 
@@ -485,6 +495,20 @@ class Commander(pdpgeneric.VerboseObject):
             remote.reboot()
             return
 
+        # Our own house-keeping
+        elif command == ':write':
+            self.remote.config.persist_current(self.next(command))
+            return
+        elif command == ':default':
+            self.remote.config.set_default_tv(self.next(command))
+            return
+        elif command == ':encrypt-setup':
+            self.remote.setup_encryption()
+            return
+        elif command == ':encrypt-fetch':
+            self.remote.setup_encryption(force_fetch=True)
+            return
+
         # Keep :foo for internals and debug
         elif command == ':about':
             remote.query_interface_information()
@@ -514,6 +538,10 @@ class Commander(pdpgeneric.VerboseObject):
  :about          - basic information about the TV
  :playing        - current input source
  :query          - list various :query_* debug commands
+ :write TVNAME   - write current config as TVNAME and set as default
+ :default TVNAME - switch default TV to TVNAME (must exist)
+ :encrypt-setup  - immediately setup encryption
+ :encrypt-fetch  - force-fetch current TV public key
 ''')
             return
 
@@ -548,15 +576,6 @@ def _setup_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument('--pin',
                         type=str, default='',
                         help='override PIN from config')
-    parser.add_argument('-w', '--write',
-                        action='store_true', default=False,
-                        help='Write out config from flags, make default')
-    parser.add_argument('--new-tvname',
-                        type=str, default='',
-                        help='With -w use a new name instead of --tv for the config')
-    parser.add_argument('-E', '--setup-encryption',
-                        action='store_true', default=False,
-                        help='Preemptively setup encryption')
     parser.add_argument('-v', '--verbose',
                         action='count', default=0,
                         help='Be more verbose')
@@ -570,12 +589,7 @@ def _main(args: typing.List[str], argv0: str) -> int:
     options = parser.parse_args(args=args)
 
     config = Config(options)
-    if options.write:
-        config.persist_current()
-
     remote = Remote(config)
-    if options.setup_encryption:
-        remote.setup_encryption()
 
     commander = Commander(remote, options.rest)
     commander.loop()
