@@ -45,6 +45,7 @@ import cryptography.hazmat.primitives.padding
 import requests
 
 if sys.stdout.isatty():
+    import curses
     import pygments
     import pygments.lexers
     import pygments.formatters
@@ -692,6 +693,7 @@ class Commander:
             'app', 'apps', '?apps', 'list-apps',
             'list-inputs', '?inputs',
             'key', ':keys',
+            ':keypad',
             'danger-reboot',
             ':write', ':default', ':encrypt-setup', ':encrypt-fetch', ':about', ':playing', ':query',
             'help', '?help', ':help',  # skip '?'
@@ -818,6 +820,9 @@ class Commander:
                 print(f'{sep}{k}', end='')
             print()
             return
+        elif command == ':keypad':
+            self.keypad_mode()
+            return
 
         elif command == 'danger-reboot':
             remote.reboot()
@@ -873,6 +878,7 @@ class Commander:
  :encrypt-setup  - immediately setup encryption
  :encrypt-fetch  - force-fetch current TV public key
  :keys           - return list of known remote control keys for 'key' command
+ :keypad         - enter a mode where we take arrow keys (&hjkl) to navigate
 If the first keycode is left-square bracket, params up until ] are all keys.
 ''', end='')
             return
@@ -1136,6 +1142,100 @@ If the first keycode is left-square bracket, params up until ] are all keys.
                 self.loop()
             except BadInput as e:
                 print('tv key:', e, file=sys.stderr)
+
+    # Rip this straight from my vlc-control project:
+    def curses_pad_for_text(self, text: str):
+        if not text:
+            return (None, 0, 0)
+        lines = text.split('\n')
+        if not lines[-1]:
+            lines.pop()
+        ysize = len(lines) + 2
+        xsize = len(max(lines, key=len)) + 2
+        pad = curses.newpad(ysize, xsize)
+        pad.box()
+        for y, l in enumerate(lines):
+            pad.addstr(y+1, 1, l)
+        return (pad, ysize, xsize)
+
+    def keypad_mode(self):
+        if not sys.stdout.isatty():
+            raise BadInput('need stdout to be a tty for :keypad mode')
+
+        def quit():
+            raise EOFError('Esc')
+
+        screen = curses.initscr()
+        pad, pad_max_y, pad_max_x = self.curses_pad_for_text('''Keypad mode:
+ Arrow keys and vi hjkl to move.
+ Space/Enter to confirm.
+ Digits to send digit keys.
+ < and > to Rewind and Forward.
+ Colors with capital initial: Yellow Blue Red Green
+ Esc or q to quit.''')
+        screen.refresh()
+        pad.refresh( 0,0, 1,1, 1+pad_max_y,1+pad_max_x )
+
+        status_coords = (1+pad_max_y, 3)
+        screen.move(*status_coords)
+
+        try:
+            prior_cursor = curses.curs_set(0)
+            curses.noecho()
+            curses.cbreak()
+            screen.keypad(True)
+            actions = {
+                'q': quit,
+                '\033': quit,
+                'KEY_BREAK': quit,
+                'h': 'Left',
+                'j': 'Down',
+                'k': 'Up',
+                'l': 'Right',
+                'KEY_LEFT': 'Left',
+                'KEY_DOWN': 'Down',
+                'KEY_UP': 'Up',
+                'KEY_RIGHT': 'Right',
+                ' ': 'Confirm',
+                'KEY_ENTER': 'Confirm',
+                '\n': 'Confirm',
+                '0': 'Num0',
+                '1': 'Num1',
+                '2': 'Num2',
+                '3': 'Num3',
+                '4': 'Num4',
+                '5': 'Num5',
+                '6': 'Num6',
+                '7': 'Num7',
+                '8': 'Num8',
+                '9': 'Num9',
+                '<': 'Rewind',
+                '>': 'Forward',
+                'Y': 'Yellow',
+                'B': 'Blue',
+                'R': 'Red',
+                'G': 'Green',
+            }
+            while True:
+                c = screen.getkey()
+                screen.deleteln()
+                screen.addstr(repr(c))
+                screen.move(*status_coords)
+                if c in actions:
+                    if callable(actions[c]):
+                        actions[c]()
+                    else:
+                        self.remote.key(actions[c])
+                else:
+                    curses.beep()
+        except EOFError:
+            pass
+        finally:
+            screen.keypad(False)
+            curses.nocbreak()
+            curses.echo()
+            curses.curs_set(prior_cursor)
+            curses.endwin()
 
 
 if sys.stdout.isatty():
