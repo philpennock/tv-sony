@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+
+"""
+tv: control living-room TV
+
+The Sony TV has a JSON REST-ish RPC interface.
+"""
+
+__author__ = 'phil@pennock-tech.com (Phil Pennock)'
+
+import argparse
+import os
+import pathlib
+import re
+import sys
+import time
+import typing
+
+import requests
+
+# Beware that digits on the remote do not enter ASCII digits but some other unicode digits
+TV_PIN_FILE = os.path.expanduser('~/.config/pdp/tv-pin')
+TV_HOST = 'maneki-neko.lan'
+DEF_USERAGENT = 'tv/0.1 (Phil Pennock)'
+
+if sys.version_info < (3, 6):
+    raise Exception('Need at least Python 3.6 for this tool')
+    # pathlib, f-strings
+
+SCRIPT_DIR = pathlib.Path(__file__).absolute().parent
+
+
+class Error(Exception):
+    """Base class for exceptions from tv."""
+    pass
+
+
+class VolumeSpecParseError(Error):
+    """Unparseable volume specification."""
+    pass
+
+
+class Exit(Exception):
+    """Base class for exceptions which exit without a stack trace."""
+    pass
+
+
+class Remote:
+    def __init__(self, addr: str, pin: str, options: argparse.Namespace) -> None:
+        self.next_id = 1
+        self.options = options
+        self.addr = addr
+        self.pin = pin
+        self._setup_requests()
+
+    def _setup_requests(self) -> None:
+        self.session = requests.Session()
+        self.session.headers['User-Agent'] = DEF_USERAGENT
+        self.session.headers['X-Auth-PSK'] = self.pin
+
+    def send(self, service: str, method: str, params: typing.Dict) -> None:
+        url = f'http://{self.addr}/sony/{service}'
+        payload_d = {
+            'method': method,
+            'version': '1.0',
+            'id': self.next_id,
+            'params': [params] if params else [],
+        }
+        self.next_id += 1
+        if self.options.verbose >= 2:
+            print(f' >> {service} / {method}')
+        r = self.session.post(url, json=payload_d)
+        if self.options.verbose:
+            print(r.json())
+
+    def _set_power(self, power_state: bool) -> None:
+        self.send('system', 'setPowerStatus', {'status': power_state})
+    power = property(None, _set_power, None)
+
+    def _set_mute(self, mute_state: bool) -> None:
+        self.send('audio', 'setAudioMute', {'status': mute_state})
+    mute = property(None, _set_mute, None)
+
+    def set_external_input(self, kind: str, port: str) -> None:
+        uri = f'extInput:{kind}?port={port}'
+        self.send('avContent', 'setPlayContent', {'uri': uri})
+
+    def _set_volume(self, new_volume: str) -> None:
+        self.send('audio', 'setAudioVolume', {'target': 'speaker', 'volume': new_volume})
+    volume = property(None, _set_volume, None)
+
+
+class Commander:
+    def __init__(self, remote: Remote, commands: typing.Sequence[str]) -> None:
+        self.remote = remote
+        self.commands = commands
+        self.vol_matcher = re.compile(r'^([+-])(\d+)\Z')
+
+    def volume(self, spec: str, allow_absolute: bool) -> None:
+        m = self.vol_matcher.match(spec)
+        if m:
+            if int(m.group(2)) > 10:
+                raise Exit('can only raise/lower by up to ±10')
+            self.remote.volume = spec
+            return
+
+        if not allow_absolute:
+            raise VolumeSpecParseError(f'unhandled volume spec {spec!r}')
+        ivol = int(spec)
+        if ivol > 100:
+            raise Exit('can only set volume to absolute 0..100')
+        self.remote.volume = str(ivol)
+
+    def one(self, command: str) -> None:
+        remote = self.remote
+        if command == 'on':
+            remote.power = True
+            return
+        elif command == 'off':
+            remote.power = False
+            return
+        elif command == 'mute':
+            remote.mute = True
+            return
+        elif command == 'unmute':
+            remote.mute = False
+            return
+        elif command in ('hdmi', 'composite', 'scart'):
+            try:
+                port = str(int(self.commands.pop(0)))
+            except Exception:
+                raise Exit(f'command {command} needs a port (1..4)')
+            remote.set_external_input(command, port)
+            return
+        elif command in ('vol', 'volume'):
+            self.volume(self.commands.pop(0), True)
+            return
+
+        try:
+            self.volume(command, False)
+            return
+        except VolumeSpecParseError:
+            pass
+
+        raise Exit(f'Unknown command {command!r}')
+
+    def loop(self) -> None:
+        is_subsequent = False
+        while self.commands:
+            if is_subsequent:
+                time.sleep(0.5)
+            else:
+                is_subsequent = True
+            self.one(self.commands.pop(0).lower())
+
+
+def _main(args: typing.List[str], argv0: str) -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('-H', '--host',
+                        type=str, default=TV_HOST,
+                        help='Override TV host/IP [%(default)s]')
+    parser.add_argument('--pin',
+                        type=str, default='',
+                        help='override PIN from config')
+    parser.add_argument('-v', '--verbose',
+                        action='count', default=0,
+                        help='Be more verbose')
+    parser.add_argument('rest', nargs='+')
+    options = parser.parse_args(args=args)
+
+    if options.pin:
+        tv_pin = options.pin
+    else:
+        tv_pin = open(TV_PIN_FILE).read().strip()
+    remote = Remote(options.host, tv_pin, options)
+
+    commander = Commander(remote, options.rest)
+    commander.loop()
+
+if __name__ == '__main__':
+    argv0 = pathlib.Path(sys.argv[0]).name
+    if argv0.endswith('.py'):
+        argv0 = argv0[:-3]
+    tracer = None
+
+    def _start(): return _main(sys.argv[1:], argv0=argv0)
+    start = _start
+    rv = 0
+    if os.environ.get('TRACE_' + argv0.upper(), None):
+        ignore = [sys.prefix, sys.exec_prefix]
+        if 'PYENV_ROOT' in os.environ:
+            ignore.append(os.environ['PYENV_ROOT'])
+        import trace
+        tracer = trace.Trace(
+            ignoredirs=ignore,
+            count=0,  # skip .cover generation
+        )
+
+        def start(): return tracer.run('_start()')
+    try:
+        rv = start()
+    except Exit as e:
+        for arg in e.args:
+            print('{}: {}'.format(argv0, arg), file=sys.stderr)
+        sys.exit(1)
+    finally:
+        if tracer:
+            tracer.results().write_results()
+    sys.exit(rv)
+
+# vim: set ft=python sw=4 expandtab :
