@@ -18,7 +18,6 @@ to talk to the TV in clear-text on disk, there's no worse vulnerability here.
 __author__ = 'phil@pennock-tech.com (Phil Pennock)'
 
 import argparse
-import atexit
 import base64
 import collections
 from dataclasses import dataclass
@@ -605,6 +604,13 @@ class Remote:
         return sorted(keylist)
 
 
+class SubRepl(Exception):
+    """Indicate that a different REPL needs to be entered."""
+    # When this is raised, the string value is used to check for a method
+    # on Commander to invoke.  "cli_body_"+str(SubRepl)
+    pass
+
+
 class Commander:
     """Command interpreter."""
 
@@ -613,12 +619,13 @@ class Commander:
         self.remote = remote
         self.commands = commands
         self.vol_matcher = re.compile(r'^([+-])(\d+)\Z')
+        self.repl = False
 
     def next(self, previous: str) -> str:
         try:
             return self.commands.pop(0)
-        except IndexError:
-            raise BadInput(f'parameter needed for command {previous!r}')
+        except IndexError as e:
+            raise BadInput(f'parameter needed for command {previous!r}') from e
 
     def volume(self, spec: str, allow_absolute: bool) -> None:
         m = self.vol_matcher.match(spec)
@@ -662,8 +669,8 @@ class Commander:
         elif command in ('hdmi', 'composite', 'scart'):
             try:
                 port = str(int(self.next(command)))
-            except BadInput:
-                raise BadInput(f'command {command} needs a port (1..4)')
+            except BadInput as e:
+                raise BadInput(f'command {command} needs a port (1..4)') from e
             # The actual limit might happen to be 4, but if we want to
             # _enforce_ then don't hard-code;
             # remote.send('avContent', 'getContentCount', {'source': 'extInput:hdmi'})
@@ -707,7 +714,14 @@ class Commander:
             return
 
         elif command == 'key':
-            keycode = self.next('keycode')
+            try:
+                keycode = self.next('keycode')
+            except BadInput as e:
+                if self.repl:
+                    raise SubRepl(command) from e
+                else:
+                    raise
+            #
             pause = False
             if keycode != '[':
                 remote.key(keycode)
@@ -815,13 +829,19 @@ If the first keycode is left-square bracket, params up until ] are all keys.
             self.one(self.next('').lower())
 
     def cli(self) -> None:
+        self.repl = True
         if self.remote.config.readline_config.exists():
             readline.read_init_file(self.remote.config.readline_config)
         if hasattr(readline, 'read_history_file'):
             if self.remote.config.readline_history.exists():
                 readline.read_history_file(self.remote.config.readline_history)
-            atexit.register(readline.write_history_file, self.remote.config.readline_history)
 
+        self.cli_body_top()
+
+        if hasattr(readline, 'write_history_file'):
+            readline.write_history_file(self.remote.config.readline_history)
+
+    def cli_body_top(self):
         while True:
             try:
                 cmd = input('tv> ')
@@ -833,6 +853,25 @@ If the first keycode is left-square bracket, params up until ] are all keys.
                 self.loop()
             except BadInput as e:
                 print('tv:', e, file=sys.stderr)
+            except SubRepl as e:
+                handler = 'cli_body_' + str(e)
+                if hasattr(self, handler):
+                    getattr(self, handler)()
+                else:
+                    raise Error(f'unknown SubRepl {e}, coding bug here') from e
+
+    def cli_body_key(self):
+        while True:
+            try:
+                cmd = input('tv key> ')
+            except EOFError:
+                print()
+                return
+            try:
+                self.commands = ['key', '['] + cmd.split() + [']']
+                self.loop()
+            except BadInput as e:
+                print('tv key:', e, file=sys.stderr)
 
 
 if sys.stdout.isatty():
