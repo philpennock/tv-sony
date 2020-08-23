@@ -18,6 +18,7 @@ to talk to the TV in clear-text on disk, there's no worse vulnerability here.
 __author__ = 'phil@pennock-tech.com (Phil Pennock)'
 
 import argparse
+import atexit
 import base64
 import collections
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ import json
 import os
 import pathlib
 import re
+import readline
 import secrets
 import shlex
 import sys
@@ -93,6 +95,11 @@ class VolumeSpecParseError(Error):
 
 class Exit(Exception):
     """Base class for exceptions which exit without a stack trace."""
+    pass
+
+
+class BadInput(Exit):
+    """Exceptions indicating bad user input."""
     pass
 
 
@@ -200,12 +207,20 @@ class Config:
         return default_pin_file.resolve().stem
 
     @property
+    def readline_config(self) -> pathlib.Path:
+        return _CONFIG_DIR / 'readline.conf'
+
+    @property
     def tv_keyfile(self) -> pathlib.Path:
         return _CACHE_DIR / (self.real_tv + '.tv.rsa.pub')
 
     @property
     def tv_ircc_codes_file(self) -> pathlib.Path:
         return _CACHE_DIR / (self.real_tv + '.ircc-codes.json')
+
+    @property
+    def readline_history(self) -> pathlib.Path:
+        return _CACHE_DIR / (self.real_tv + '.readline.history')
 
     @property
     def our_public_keyfile(self) -> pathlib.Path:
@@ -249,9 +264,9 @@ class Config:
         pin_file = _CONFIG_DIR / (target_tvname + '.' + Config.PIN_FILEEXT)
         host_file = _CONFIG_DIR / (target_tvname + '.' + Config.HOST_FILEEXT)
         if not pin_file.exists():
-            raise Exit(f"can't repoint default TV to {target_tvname!r}, missing {pin_file.name!r}")
+            raise BadInput(f"can't repoint default TV to {target_tvname!r}, missing {pin_file.name!r}")
         if not host_file.exists():
-            raise Exit(f"can't repoint default TV to {target_tvname!r}, missing {host_file.name!r}")
+            raise BadInput(f"can't repoint default TV to {target_tvname!r}, missing {host_file.name!r}")
         for src, dest in [(default_pin_file, pin_file), (default_host_file, host_file)]:
             if src.exists() and not src.is_symlink():
                 src.rename(src.with_suffix('.old' + src.suffix))
@@ -436,10 +451,10 @@ class Remote:
         res = self.query('appControl', 'getApplicationList', {})
         filtered = [app for app in res['result'][0] if html.unescape(app['title']).lower() == needle]
         if not filtered:
-            raise Exit(f'unknown app {appname!r}')
+            raise BadInput(f'unknown app {appname!r}')
         if len(filtered) > 1:
             applist = ', '.join(map(lambda x: shlex.quote(html.unescape(x['title'])), filtered))
-            raise Exit(f'too many apps found for {appname!r}: {applist}')
+            raise BadInput(f'too many apps found for {appname!r}: {applist}')
         uri = filtered[0]['uri']
         self.send('appControl', 'setActiveApp', {'uri': uri})
 
@@ -579,7 +594,7 @@ class Remote:
         lk = keyname.lower()
 
         if lk not in self._ircc_dict:
-            raise Exit(f'unknown keycode {keyname!r}')
+            raise BadInput(f'unknown keycode {keyname!r}')
         self._send_ircc_rawcode(self._ircc_dict[lk].Rawcode)
 
     def known_keys(self) -> typing.List[str]:
@@ -603,13 +618,13 @@ class Commander:
         try:
             return self.commands.pop(0)
         except IndexError:
-            raise Exit(f'parameter needed for command {previous!r}')
+            raise BadInput(f'parameter needed for command {previous!r}')
 
     def volume(self, spec: str, allow_absolute: bool) -> None:
         m = self.vol_matcher.match(spec)
         if m:
             if int(m.group(2)) > 10:
-                raise Exit('can only raise/lower by up to ±10')
+                raise BadInput('can only raise/lower by up to ±10')
             self.remote.volume = spec
             return
 
@@ -617,7 +632,7 @@ class Commander:
             raise VolumeSpecParseError(f'unhandled volume spec {spec!r}')
         ivol = int(spec)
         if ivol > 100:
-            raise Exit('can only set volume to absolute 0..100')
+            raise BadInput('can only set volume to absolute 0..100')
         self.remote.volume = str(ivol)
 
     _command_typos = {
@@ -647,8 +662,8 @@ class Commander:
         elif command in ('hdmi', 'composite', 'scart'):
             try:
                 port = str(int(self.next(command)))
-            except Exit:
-                raise Exit(f'command {command} needs a port (1..4)')
+            except BadInput:
+                raise BadInput(f'command {command} needs a port (1..4)')
             # The actual limit might happen to be 4, but if we want to
             # _enforce_ then don't hard-code;
             # remote.send('avContent', 'getContentCount', {'source': 'extInput:hdmi'})
@@ -788,7 +803,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
         except VolumeSpecParseError:
             pass
 
-        raise Exit(f'Unknown command {command!r}')
+        raise BadInput(f'unknown command {command!r}')
 
     def loop(self) -> None:
         is_subsequent = False
@@ -798,6 +813,26 @@ If the first keycode is left-square bracket, params up until ] are all keys.
             else:
                 is_subsequent = True
             self.one(self.next('').lower())
+
+    def cli(self) -> None:
+        if self.remote.config.readline_config.exists():
+            readline.read_init_file(self.remote.config.readline_config)
+        if hasattr(readline, 'read_history_file'):
+            if self.remote.config.readline_history.exists():
+                readline.read_history_file(self.remote.config.readline_history)
+            atexit.register(readline.write_history_file, self.remote.config.readline_history)
+
+        while True:
+            try:
+                cmd = input('tv> ')
+            except EOFError:
+                print()
+                return
+            try:
+                self.commands = cmd.split()
+                self.loop()
+            except BadInput as e:
+                print('tv:', e, file=sys.stderr)
 
 
 if sys.stdout.isatty():
@@ -832,7 +867,7 @@ def _setup_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument('-v', '--verbose',
                         action='count', default=0,
                         help='Be more verbose')
-    parser.add_argument('rest', nargs='+', metavar='Command',
+    parser.add_argument('rest', nargs='*', metavar='Command',
                         help='TV commands to issue (try :help)')
     return parser
 
@@ -845,7 +880,10 @@ def _main(args: typing.List[str], argv0: str) -> int:
     remote = Remote(config)
 
     commander = Commander(remote, options.rest)
-    commander.loop()
+    if options.rest:
+        commander.loop()
+    else:
+        commander.cli()
     return 0
 
 
