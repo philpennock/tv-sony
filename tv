@@ -1184,8 +1184,9 @@ If the first keycode is left-square bracket, params up until ] are all keys.
   Digits to send digit keys.
   < and > to Rewind and Forward.
   = to Pause, + to Play
+  [ and ] to lower and increase volume, 'm' to Mute
   Colors with capital initial: Yellow Blue Red Green
-  Esc or q to quit.'''.replace('\n', ' \n'))
+  Esc or 'q' to quit.'''.replace('\n', ' \n'))
 
         try:
             screen.refresh()
@@ -1239,19 +1240,23 @@ If the first keycode is left-square bracket, params up until ] are all keys.
                 '\x7F': 'Return',
                 '=': 'Pause',
                 '+': 'Play',
+                '[': 'VolumeDown',
+                ']': 'VolumeUp',
+                'm': 'Mute',
             }
             while True:
                 c = screen.getkey()
                 screen.deleteln()
                 screen.addstr(repr(c))
-                screen.move(*status_coords)
                 if c in actions:
                     if callable(actions[c]):
                         actions[c]()
                     else:
+                        screen.addstr(' → ' + str(actions[c]))
                         self.remote.key(actions[c])
                 else:
                     curses.beep()
+                screen.move(*status_coords)
         except EOFError:
             pass
         finally:
