@@ -1176,21 +1176,29 @@ If the first keycode is left-square bracket, params up until ] are all keys.
             raise EOFError('Esc')
 
         screen = curses.initscr()
-        pad, pad_max_y, pad_max_x = self.curses_pad_for_text('''Keypad mode:
- Arrow keys and vi hjkl to move.
- Space/Enter to confirm.
- Digits to send digit keys.
- < and > to Rewind and Forward.
- Colors with capital initial: Yellow Blue Red Green
- Esc or q to quit.''')
-        screen.refresh()
-        pad.refresh( 0,0, 1,1, 1+pad_max_y,1+pad_max_x )
-
-        status_coords = (1+pad_max_y, 3)
-        screen.move(*status_coords)
-        screen.deleteln()
+        pad_top_y, pad_top_x = 1, 1
+        pad, pad_max_y, pad_max_x = self.curses_pad_for_text('''\
+  Arrow keys and vi hjkl to move.
+  Space/Enter to confirm.
+  Backspace to 'Return' (go back)
+  Digits to send digit keys.
+  < and > to Rewind and Forward.
+  = to Pause, + to Play
+  Colors with capital initial: Yellow Blue Red Green
+  Esc or q to quit.'''.replace('\n', ' \n'))
 
         try:
+            screen.refresh()
+            pad.refresh(0, 0,
+                        pad_top_y, pad_top_x,
+                        pad_top_y+pad_max_y, pad_top_x+pad_max_x )
+            screen.move(pad_top_y, pad_top_x+3)
+            screen.addstr('┤ Keypad mode ├')
+
+            status_coords = (1+pad_top_y+pad_max_y, pad_top_x+3)
+            screen.move(*status_coords)
+            screen.deleteln()
+
             prior_cursor = curses.curs_set(0)
             curses.noecho()
             curses.cbreak()
@@ -1226,6 +1234,11 @@ If the first keycode is left-square bracket, params up until ] are all keys.
                 'B': 'Blue',
                 'R': 'Red',
                 'G': 'Green',
+                'KEY_BACKSPACE': 'Return',
+                '\x08': 'Return',
+                '\x7F': 'Return',
+                '=': 'Pause',
+                '+': 'Play',
             }
             while True:
                 c = screen.getkey()
