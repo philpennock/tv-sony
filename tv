@@ -1255,6 +1255,8 @@ If the first keycode is left-square bracket, params up until ] are all keys.
                         timed_out = True
                 except Exception:
                     timed_out = True
+                except KeyboardInterrupt as e:
+                    raise Exit(f'killed by {e!r}') from e
                 if timed_out:
                     screen.timeout(-1)
                     screen.move(*status_coords)
