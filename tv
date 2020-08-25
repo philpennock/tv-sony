@@ -1268,9 +1268,12 @@ If the first keycode is left-square bracket, params up until ] are all keys.
                 screen.deleteln()
                 screen.addstr(repr(c))
                 if c == 'KEY_MOUSE':
-                    m_id, m_x, m_y, m_z, m_bstate = curses.getmouse()
-                    screen.addstr(f' ({m_bstate})')
-                    # TODO: implement an on-screen remote which uses mouse ckips
+                    try:
+                        m_id, m_x, m_y, m_z, m_bstate = curses.getmouse()
+                        screen.addstr(f' ({m_bstate})')
+                        # TODO: implement an on-screen remote which uses mouse ckips
+                    except Exception:
+                        screen.addstr(' BOGUS')
                 elif c in actions:
                     if callable(actions[c]):
                         actions[c]()
