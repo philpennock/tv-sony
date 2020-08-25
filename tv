@@ -369,7 +369,7 @@ class Remote:
         self.pin = config.tv_pin
         self._tv_pubkey_b64: typing.Optional[str] = None
         self._tv_pubkey_bin: typing.Optional[bytes] = None
-        self._ircc_dict: typing.Optional[typing.Dict] = None
+        self._ircc_dict: typing.Optional[typing.Dict[str, IRCCKeyCode]] = None
         self._setup_requests()
 
     def verbosity(self, n: int = 1) -> bool:
@@ -556,7 +556,7 @@ class Remote:
 
     text = property(get_text_form, set_text_form, None)
 
-    def _send_ircc_rawcode(self, rawcode: str) -> None:
+    def _send_ircc_rawcode(self, rawcode: str) -> requests.Response:
         # <https://pro-bravia.sony.net/develop/integrate/ircc-ip/overview/index.html>
         url = f'http://{self.addr}/sony/ircc'
         soap_headers = {
@@ -614,6 +614,8 @@ class Remote:
 
     def key(self, keyname: str) -> None:
         self._setup_ircc()
+        if self._ircc_dict is None:
+            raise Error('no _ircc_dict after setup')
 
         # Why Num 0-9,11,12 ?  Where's the love for 10?
         if len(keyname) == 1 and keyname.isdigit() or keyname in ('Num11', 'Num12',):
@@ -631,7 +633,9 @@ class Remote:
 
     def known_keys(self) -> typing.List[str]:
         self._setup_ircc()
-        keylist = [None] * len(self._ircc_dict)
+        if self._ircc_dict is None:
+            raise Error('no _ircc_dict after setup')
+        keylist = [''] * len(self._ircc_dict)
         for i, k in enumerate(self._ircc_dict.keys()):
             keylist[i] = self._ircc_dict[k].KeyName
         return sorted(keylist)
@@ -956,22 +960,23 @@ If the first keycode is left-square bracket, params up until ] are all keys.
     def push_rl_context(self, name: str) -> None:
         if hasattr(self, '_rl_context_current'):
             self._completion_context_stack.append(self._rl_context_current)
-        self._rl_context_current = name
+        self._rl_context_current: str = name
         self._command_set = f'_{name}_completions'
 
     def pop_rl_context(self) -> None:
         self._rl_context_current = self._completion_context_stack.pop()
         self._command_set = f'_{self._rl_context_current}_completions'
 
-    def _complete_commands(self, text: str, state: int) -> str:
+    def _complete_commands(self, text: str, state: int) -> typing.Optional[str]:
         # readline swallows exceptions!
         try:
             return self._complete_commands_r(text, state)
         except Exception as e:
             print(f'\noops: {e!r} inside completion', file=sys.stderr)
             traceback.print_exc(file=sys.stdout)
+            raise
 
-    def _complete_commands_r(self, text: str, state: int) -> str:
+    def _complete_commands_r(self, text: str, state: int) -> typing.Optional[str]:
         self.cdbg(f'completion: {text!r} [{state!r}]')
         ltext = text.lower()
         if ltext and ltext[0] == "'":
@@ -1017,7 +1022,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
             return None
         self.cdbg('fell-off-end')
 
-    def use_completer(self, name: str, push_ctx: str, text: str, state: int) -> str:
+    def use_completer(self, name: str, push_ctx: typing.Optional[str], text: str, state: int) -> str:
         if self.options.verbose >= 4:
             print(f'use_completer {name!r} in state {state}', file=sys.stderr, flush=True)
         self._prior_completer = getattr(self, name)
@@ -1079,6 +1084,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
                             push_candidate = ctx.Name
                             break
                 if not ctx.Swallow:
+                    # FIXME: this is probably buggy, the type system is hinting as much.
                     ctx_tree = ctx
             # else not in ctx_tree, so it's not taking params, so stay in the current state.
         try:
@@ -1154,7 +1160,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
                 print('tv key:', e, file=sys.stderr)
 
     # Rip this straight from my vlc-control project:
-    def curses_pad_for_text(self, text: str):
+    def curses_pad_for_text(self, text: str) -> typing.Tuple[curses.window, int, int]:
         if not text:
             return (None, 0, 0)
         lines = text.split('\n')
