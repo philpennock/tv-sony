@@ -17,7 +17,8 @@ with a curses mode to take keystrokes.  That means:
    tab-complete its own commands, all remote control buttons known by the TV,
    and the names of various apps installed on the TV.
 3. You can use cursor keys (and/or vi keys) and space/enter for basic control
-   without needing to type commands and hit enter.
+   without needing to type commands and hit enter.  Or click on-screen buttons
+   with your mouse.
 
 It's written in Python, developed against Python 3.8.
 
@@ -75,7 +76,9 @@ between each key; these delays were chosen arbitrarily).
 $ tv :keypad
 ```
 
-Dive straight into the keypad control mode.
+Dive straight into the keypad control mode.  The help will show you the
+available key-strokes, and there are pseudo-buttons show which you can click
+on, to be an in-tty GUI.
 
 
 ## Setup
