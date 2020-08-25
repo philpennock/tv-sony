@@ -59,7 +59,7 @@ SCRIPT_DIR = pathlib.Path(__file__).absolute().parent
 # FIXME: this is not fully XDG-compliant
 _APP_NAME = pathlib.Path('tv')
 _HOME_DIR = _APP_NAME.home()
-VERSION_INFO = '0.2'
+VERSION_INFO = '0.2.1'
 
 
 def _xdg_dir(varname: str, home_rel_default: typing.Sequence[str]) -> pathlib.Path:
@@ -78,7 +78,7 @@ _CACHE_DIR = _xdg_dir('XDG_CACHE_HOME', ('.cache',))         # keep a copy of th
 _DATA_DIR = _xdg_dir('XDG_DATA_HOME', ('.local', 'share',))  # keep our local private/public keys for encryption
 _DEFAULT_TV = 'default'
 
-DEF_USERAGENT = 'tv/0.2 (Phil Pennock)'
+DEF_USERAGENT = f'tv/{VERSION_INFO} (Phil Pennock)'
 # This exists just for local disk and might as well be the empty string, but I
 # don't want to fight APIs any more, so this is one generated password which
 # I'm leaving in source, on the basis that it's like bouncycastle's "changeme"
