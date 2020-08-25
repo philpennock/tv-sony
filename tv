@@ -59,6 +59,7 @@ SCRIPT_DIR = pathlib.Path(__file__).absolute().parent
 # FIXME: this is not fully XDG-compliant
 _APP_NAME = pathlib.Path('tv')
 _HOME_DIR = _APP_NAME.home()
+VERSION_INFO = '0.2'
 
 
 def _xdg_dir(varname: str, home_rel_default: typing.Sequence[str]) -> pathlib.Path:
@@ -1407,6 +1408,9 @@ def _setup_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument('-v', '--verbose',
                         action='count', default=0,
                         help='Be more verbose')
+    parser.add_argument('--version',
+                        action='store_true', default=False,
+                        help='Show version and exit')
     parser.add_argument('rest', nargs='*', metavar='Command',
                         help='TV commands to issue (try :help)')
     return parser
@@ -1415,6 +1419,10 @@ def _setup_cli_parser() -> argparse.ArgumentParser:
 def _main(args: typing.List[str], argv0: str) -> int:
     parser = _setup_cli_parser()
     options = parser.parse_args(args=args)
+
+    if options.version:
+        print(VERSION_INFO)
+        return 0
 
     config = Config(options)
     remote = Remote(config)
