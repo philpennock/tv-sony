@@ -1187,15 +1187,12 @@ If the first keycode is left-square bracket, params up until ] are all keys.
         # but there's going to be "not very many" buttons, so flat-list walking
         # is tolerable.
 
-    def curses_button(self, text: str, action: str, y: int, x: int, fg_color: typing.Optional[int]=None) -> None:
+    def curses_button(self, text: str, action: str, y: int, x: int) -> None:
         # Our assumption is that text will be Unicode with presentation
         # controls and will always look like it's one character wide.
         p = curses.newpad(3, 4)
         p.box()
-        if fg_color is not None:
-            p.addstr(1, 1, text + ' ', fg_color)
-        else:
-            p.addstr(1, 1, text + ' ')
+        p.addstr(1, 1, text + ' ')
         self._all_curses_buttons.append(ButtonMade(y, x, 3, 4, p, action))
 
     def curses_refresh_buttons(self) -> None:
@@ -1217,7 +1214,10 @@ If the first keycode is left-square bracket, params up until ] are all keys.
         ButtonSpec(13, 6, '🕪', 'Mute'),
         ButtonSpec(13, 11, '↗', 'VolumeUp'),
         # leave 16 for digits filled in separately
-        # leave 19 for colors, because we handle the color specially.
+        ButtonSpec(19, 1, 'Y', 'Yellow'),
+        ButtonSpec(19, 6, 'B', 'Blue'),
+        ButtonSpec(19, 11, 'R', 'Red'),
+        ButtonSpec(19, 16, 'G', 'Green'),
     ]
 
     def curses_create_buttons(self) -> None:
@@ -1227,10 +1227,6 @@ If the first keycode is left-square bracket, params up until ] are all keys.
         for d in range(10):
             ds = str(d)
             self.curses_button(ds, 'Num'+ds, 16, 1 + 5 * d)
-        self.curses_button('Y', 'Yellow', 19, 1, curses.COLOR_YELLOW)
-        self.curses_button('B', 'Blue', 19, 6, curses.COLOR_BLUE)
-        self.curses_button('R', 'Red', 19, 11, curses.COLOR_RED)
-        self.curses_button('G', 'Green', 19, 16, curses.COLOR_GREEN)
 
     def curses_match_click(self, y: int, x: int) -> str:
         for b in self._all_curses_buttons:
@@ -1249,7 +1245,6 @@ If the first keycode is left-square bracket, params up until ] are all keys.
 
         try:
             screen = curses.initscr()
-            curses.start_color()
 
             pad_top_y, pad_top_x = 1, 16
             pad, pad_max_y, pad_max_x = self.curses_pad_for_text('''\
