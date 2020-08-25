@@ -1203,6 +1203,9 @@ If the first keycode is left-square bracket, params up until ] are all keys.
             prior_cursor = curses.curs_set(0)
             curses.noecho()
             curses.cbreak()
+            available_mouse_mask, old_mouse_mask = curses.mousemask(
+                curses.BUTTON1_CLICKED | curses.BUTTON1_CLICKED | curses.BUTTON1_CLICKED,
+            )
             screen.keypad(True)
             actions = {
                 'q': quit,
@@ -1264,7 +1267,11 @@ If the first keycode is left-square bracket, params up until ] are all keys.
                     continue
                 screen.deleteln()
                 screen.addstr(repr(c))
-                if c in actions:
+                if c == 'KEY_MOUSE':
+                    m_id, m_x, m_y, m_z, m_bstate = curses.getmouse()
+                    screen.addstr(f' ({m_bstate})')
+                    # TODO: implement an on-screen remote which uses mouse ckips
+                elif c in actions:
                     if callable(actions[c]):
                         actions[c]()
                     else:
@@ -1278,6 +1285,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
             pass
         finally:
             screen.keypad(False)
+            curses.mousemask(old_mouse_mask)
             curses.nocbreak()
             curses.echo()
             curses.curs_set(prior_cursor)
