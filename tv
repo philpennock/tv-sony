@@ -1244,8 +1244,22 @@ If the first keycode is left-square bracket, params up until ] are all keys.
                 ']': 'VolumeUp',
                 'm': 'Mute',
             }
+            screen.timeout(-1)
             while True:
-                c = screen.getkey()
+                timed_out = False
+                # curses.getch() documented to return -1 on timeout, but curses.getkey() is a layer around that
+                # and appears to raise _curses.error on timeout.  The documentation just says "an exception".
+                try:
+                    c = screen.getkey()
+                    if c == -1:
+                        timed_out = True
+                except Exception:
+                    timed_out = True
+                if timed_out:
+                    screen.timeout(-1)
+                    screen.move(*status_coords)
+                    screen.deleteln()
+                    continue
                 screen.deleteln()
                 screen.addstr(repr(c))
                 if c in actions:
@@ -1257,6 +1271,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
                 else:
                     curses.beep()
                 screen.move(*status_coords)
+                screen.timeout(3 * 1000)  # milliseconds
         except EOFError:
             pass
         finally:
