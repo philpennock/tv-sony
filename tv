@@ -839,7 +839,7 @@ class Commander:
                 print(f'{sep}{k}', end='')
             print()
             return
-        elif command == ':keypad':
+        elif command in (':keypad', '!'):
             self.keypad_mode()
             return
 
@@ -929,6 +929,10 @@ If the first keycode is left-square bracket, params up until ] are all keys.
             if self.remote.config.readline_history.exists():
                 readline.read_history_file(self.remote.config.readline_history)
 
+        print('tv: This is a TV remote control, REPL mode; :keypad or ! for keypad')
+        print('tv: EOF (Ctrl-D) to quit, help for help, tab-completion available')
+        print('tv: "key" to enter the remote keys mode, :keys to list known keys')
+        print(f'tv: Target {self.remote.config.real_tv!r} [{self.remote.config.tv_host}]')
         self.cli_body_top()
 
         if hasattr(readline, 'write_history_file'):
