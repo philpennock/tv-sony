@@ -116,6 +116,10 @@ IRCCKeyCode = collections.namedtuple('IRCCKeyCode', ['KeyName', 'Rawcode'])
 # MapSubCommands lets us build a tree.
 RLContext = collections.namedtuple('RLContext', ['Name', 'IsCommandSet', 'Swallow', 'MapSubCommands'])
 
+# curses button spec
+ButtonSpec = collections.namedtuple('ButtonSpec', ['y', 'x', 'Text', 'RemoteKey'])
+ButtonMade = collections.namedtuple('ButtonMade', ['top_y', 'top_x', 'height', 'width', 'pad', 'RemoteKey'])
+
 
 @dataclass
 class WrapCrypto:
@@ -1160,7 +1164,8 @@ If the first keycode is left-square bracket, params up until ] are all keys.
                 print('tv key:', e, file=sys.stderr)
 
     # Rip this straight from my vlc-control project:
-    def curses_pad_for_text(self, text: str) -> typing.Tuple[curses.window, int, int]:
+    # but add the return type; typing.Any for _curses.window
+    def curses_pad_for_text(self, text: str) -> typing.Tuple[typing.Any, int, int]:
         if not text:
             return (None, 0, 0)
         lines = text.split('\n')
@@ -1174,6 +1179,67 @@ If the first keycode is left-square bracket, params up until ] are all keys.
             pad.addstr(y+1, 1, l)
         return (pad, ysize, xsize)
 
+    def curses_reset_button_list(self):
+        # typing.Any for the hidden curses _CursesWindow
+        self._all_curses_buttons: typing.List[ButtonMade] = []
+        # When we're looking for where a mouse-click was, we'll just walk that
+        # list to see if the click was within the button; it's not efficient
+        # but there's going to be "not very many" buttons, so flat-list walking
+        # is tolerable.
+
+    def curses_button(self, text: str, action: str, y: int, x: int, fg_color: typing.Optional[int]=None) -> None:
+        # Our assumption is that text will be Unicode with presentation
+        # controls and will always look like it's one character wide.
+        p = curses.newpad(3, 4)
+        p.box()
+        if fg_color is not None:
+            p.addstr(1, 1, text + ' ', fg_color)
+        else:
+            p.addstr(1, 1, text + ' ')
+        self._all_curses_buttons.append(ButtonMade(y, x, 3, 4, p, action))
+
+    def curses_refresh_buttons(self) -> None:
+        for b in self._all_curses_buttons:
+            b.pad.refresh(0, 0,
+                          b.top_y, b.top_x,
+                          b.top_y + b.height, b.top_x+b.width)
+
+    _ButtonList: typing.List[ButtonSpec] = [
+        ButtonSpec(1, 6, '↑', 'Up'),
+        ButtonSpec(4, 1, '←', 'Left'),
+        ButtonSpec(4, 6, '⏎', 'Confirm'),
+        ButtonSpec(4, 11, '→', 'Right'),
+        ButtonSpec(7, 6, '↓', 'Down'),
+        ButtonSpec(10, 1, '⏸', 'Pause'),
+        ButtonSpec(10, 6, '▶', 'Play'),
+        ButtonSpec(10, 11, '⏹', 'Stop'),
+        ButtonSpec(13, 1, '↙', 'VolumeDown'),
+        ButtonSpec(13, 6, '🕪', 'Mute'),
+        ButtonSpec(13, 11, '↗', 'VolumeUp'),
+        # leave 16 for digits filled in separately
+        # leave 19 for colors, because we handle the color specially.
+    ]
+
+    def curses_create_buttons(self) -> None:
+        self.curses_reset_button_list()
+        for b in Commander._ButtonList:
+            self.curses_button(b.Text, b.RemoteKey, b.y, b.x)
+        for d in range(10):
+            ds = str(d)
+            self.curses_button(ds, 'Num'+ds, 16, 1 + 5 * d)
+        self.curses_button('Y', 'Yellow', 19, 1, curses.COLOR_YELLOW)
+        self.curses_button('B', 'Blue', 19, 6, curses.COLOR_BLUE)
+        self.curses_button('R', 'Red', 19, 11, curses.COLOR_RED)
+        self.curses_button('G', 'Green', 19, 16, curses.COLOR_GREEN)
+
+    def curses_match_click(self, y: int, x: int) -> str:
+        for b in self._all_curses_buttons:
+            off_y = y - b.top_y
+            off_x = x - b.top_x
+            if off_y >= 0 and off_y < b.height and off_x >= 0 and off_x < b.width:
+                return b.RemoteKey
+        return ''
+
     def keypad_mode(self):
         if not sys.stdout.isatty():
             raise BadInput('need stdout to be a tty for :keypad mode')
@@ -1181,9 +1247,13 @@ If the first keycode is left-square bracket, params up until ] are all keys.
         def quit():
             raise EOFError('Esc')
 
-        screen = curses.initscr()
-        pad_top_y, pad_top_x = 1, 1
-        pad, pad_max_y, pad_max_x = self.curses_pad_for_text('''\
+        try:
+            screen = curses.initscr()
+            curses.start_color()
+
+            pad_top_y, pad_top_x = 1, 16
+            pad, pad_max_y, pad_max_x = self.curses_pad_for_text('''\
+  You can click on the buttons to the left, or use key-strokes.
   Arrow keys and vi hjkl to move.
   Space/Enter to confirm.
   Backspace to 'Return' (go back)
@@ -1194,15 +1264,17 @@ If the first keycode is left-square bracket, params up until ] are all keys.
   Colors with capital initial: Yellow Blue Red Green
   Esc or 'q' to quit.'''.replace('\n', ' \n'))
 
-        try:
+            self.curses_create_buttons()
+
             screen.refresh()
+            self.curses_refresh_buttons()
             pad.refresh(0, 0,
                         pad_top_y, pad_top_x,
-                        pad_top_y+pad_max_y, pad_top_x+pad_max_x )
+                        pad_top_y+pad_max_y, pad_top_x+pad_max_x)
             screen.move(pad_top_y, pad_top_x+3)
             screen.addstr('┤ Keypad mode ├')
 
-            status_coords = (1+pad_top_y+pad_max_y, pad_top_x+3)
+            status_coords = (22, pad_top_x+3)
             screen.move(*status_coords)
             screen.deleteln()
 
@@ -1210,7 +1282,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
             curses.noecho()
             curses.cbreak()
             available_mouse_mask, old_mouse_mask = curses.mousemask(
-                curses.BUTTON1_CLICKED | curses.BUTTON1_CLICKED | curses.BUTTON1_CLICKED,
+                curses.BUTTON1_CLICKED | curses.BUTTON2_CLICKED | curses.BUTTON3_CLICKED,
             )
             screen.keypad(True)
             actions = {
@@ -1277,7 +1349,14 @@ If the first keycode is left-square bracket, params up until ] are all keys.
                     try:
                         m_id, m_x, m_y, m_z, m_bstate = curses.getmouse()
                         screen.addstr(f' ({m_bstate})')
-                        # TODO: implement an on-screen remote which uses mouse ckips
+                        found = self.curses_match_click(m_y, m_x)
+                        if found and m_bstate & curses.BUTTON1_CLICKED:
+                            self.remote.key(found)
+                            screen.addstr(f' [{found}]')
+                        elif found:
+                            screen.addstr(' (ignoring non-button1)')
+                        else:
+                            screen.addstr(' <no-button>')
                     except Exception:
                         screen.addstr(' BOGUS')
                 elif c in actions:
