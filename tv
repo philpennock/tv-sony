@@ -107,6 +107,11 @@ class BadInput(Exit):
     pass
 
 
+class Unconfigured(Exit):
+    """Missing necessary setup configuration."""
+    pass
+
+
 # InfraRed Compatible Control data from the TV, for the SOAP interface
 IRCCKeyCode = collections.namedtuple('IRCCKeyCode', ['KeyName', 'Rawcode'])
 
@@ -197,8 +202,11 @@ class Config:
         # .tv is the config name as given, often 'default
         # .real_tv is the actual name, use this to write files
         self.tv = self.options.tv
-        self.tv_pin = self.derive_field(Config.PIN_OPTION, Config.PIN_FILEEXT)
-        self.tv_host = self.derive_field(Config.HOST_OPTION, Config.HOST_FILEEXT)
+        try:
+            self.tv_pin = self.derive_field(Config.PIN_OPTION, Config.PIN_FILEEXT)
+            self.tv_host = self.derive_field(Config.HOST_OPTION, Config.HOST_FILEEXT)
+        except FileNotFoundError as e:
+            raise Unconfigured(f'missing stored config for tv ({self.tv})') from e
         self.using_default = self.tv == _DEFAULT_TV
         if self.using_default:
             self.real_tv = self._find_real_tvname()
@@ -353,6 +361,8 @@ class Config:
         return typed
 
     def save_ircc_codes(self, jdata: typing.Dict) -> None:
+        if not self.tv_ircc_codes_file.parent.exists():
+            self.tv_ircc_codes_file.parent.mkdir(0o700)
         with self.tv_ircc_codes_file.open('w') as wh:
             # sort to make git and diff saner, if we move from cache
             json.dump(jdata, wh, indent=1, sort_keys=True)
@@ -1428,7 +1438,13 @@ def _main(args: typing.List[str], argv0: str) -> int:
         print(VERSION_INFO)
         return 0
 
-    config = Config(options)
+    try:
+        config = Config(options)
+    except Unconfigured as e:
+        print('tv: no configuration stored?', file=sys.stderr)
+        print('tv: setup with: tv --host <HOST> --pin <SECRET> :write your-tv-name-here', file=sys.stderr)
+        raise e
+
     remote = Remote(config)
 
     commander = Commander(remote, options.rest)
