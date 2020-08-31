@@ -1220,11 +1220,11 @@ If the first keycode is left-square bracket, params up until ] are all keys.
     # help here, so pick symbols which don't get emojified and break our curses
     # layer.
     _ButtonList: typing.List[ButtonSpec] = [
-        ButtonSpec(1, 1, '⟲', 'Return'),
         ButtonSpec(1, 6, '↑', 'Up'),
         ButtonSpec(4, 1, '←', 'Left'),
         ButtonSpec(4, 6, '⏎', 'Confirm'),
         ButtonSpec(4, 11, '→', 'Right'),
+        ButtonSpec(7, 1, '⮢', 'Return'),
         ButtonSpec(7, 6, '↓', 'Down'),
         ButtonSpec(10, 1, '⏸', 'Pause'),
         ButtonSpec(10, 6, '▶', 'Play'),
