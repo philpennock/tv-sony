@@ -1216,7 +1216,11 @@ If the first keycode is left-square bracket, params up until ] are all keys.
                           b.top_y, b.top_x,
                           b.top_y + b.height, b.top_x+b.width)
 
+    # nb: embedding \uFE0E to try to force text presentation doesn't seem to
+    # help here, so pick symbols which don't get emojified and break our curses
+    # layer.
     _ButtonList: typing.List[ButtonSpec] = [
+        ButtonSpec(1, 1, '⟲', 'Return'),
         ButtonSpec(1, 6, '↑', 'Up'),
         ButtonSpec(4, 1, '←', 'Left'),
         ButtonSpec(4, 6, '⏎', 'Confirm'),
