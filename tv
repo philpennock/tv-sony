@@ -46,6 +46,8 @@ import requests
 
 if sys.stdout.isatty():
     import curses
+    import curses.textpad
+    import io
     import pygments
     import pygments.lexers
     import pygments.formatters
@@ -379,6 +381,8 @@ class Remote:
     def __init__(self, config: Config) -> None:
         self.options = config.options
         self.config = config
+        self.output = sys.stdout
+        self.errstream = sys.stderr
         self.next_id = 1
         self.addr = config.tv_host
         self.pin = config.tv_pin
@@ -393,7 +397,7 @@ class Remote:
     def verbose(self, message: str, level=1) -> None:
         if self.options.verbose < level:
             return
-        print('[remote] '+message, file=sys.stderr, flush=True)
+        print('[remote] '+message, file=self.errstream, flush=True)
 
     def _setup_requests(self) -> None:
         self.session = requests.Session()
@@ -410,25 +414,25 @@ class Remote:
         }
         self.next_id += 1
         if self.verbosity(3):
-            print(f'> POST <{url}> ', end='')
-            pretty_print_json(payload_d)
+            print(f'> POST <{url}> ', end='', file=self.output)
+            pretty_print_json(payload_d, stream=self.output)
         elif self.verbosity(2):
-            print(f' >> {service} / {method}')
+            print(f' >> {service} / {method}', file=self.output)
         r = self.session.post(url, json=payload_d)
         return r
 
     def send(self, service: str, method: str, params: typing.Dict, **kwargs) -> None:
         r = self._send(service, method, params, **kwargs)
         if self.verbosity():
-            pretty_print_json(r.json())
+            pretty_print_json(r.json(), stream=self.output)
 
     def query(self, service: str, method: str, params: typing.Dict, **kwargs) -> typing.Dict:
         res = self._send(service, method, params, **kwargs)
         if self.verbosity(3):
-            print(f'< {res.status_code} {res.reason}')
+            print(f'< {res.status_code} {res.reason}', file=self.output)
             if self.verbosity(4):
-                pretty_print_json(dict(res.headers))
-            pretty_print_json(res.json())
+                pretty_print_json(dict(res.headers), stream=self.output)
+            pretty_print_json(res.json(), stream=self.output)
         return res.json()
 
     def check_error(self, label: str, result: typing.Dict) -> None:
@@ -500,7 +504,7 @@ class Remote:
     def _query_show_json(self, *args, result_index=0, **kwargs) -> None:
         res = self.query(*args, **kwargs)
         self.check_error(inspect.stack()[1].function, res)
-        pretty_print_json(res['result'][result_index])
+        pretty_print_json(res['result'][result_index], stream=self.output)
 
     def query_supported_apis(self) -> None:
         self._query_show_json('guide', 'getSupportedApiInfo', {'services': Remote.KNOWN_SERVICES})
@@ -640,7 +644,7 @@ class Remote:
         if lk not in self._ircc_dict:
             if lk in self.fallback_key_aliases and self.fallback_key_aliases[lk] in self._ircc_dict:
                 new_lk = self.fallback_key_aliases[lk]
-                print(f'tv key: alias fixup: {lk!r} -> {new_lk!r}', file=sys.stderr)
+                print(f'tv key: alias fixup: {lk!r} -> {new_lk!r}', file=self.errstream)
                 lk = new_lk
             else:
                 raise BadInput(f'unknown keycode {keyname!r}')
@@ -670,6 +674,8 @@ class Commander:
         self.options = remote.options
         self.remote = remote
         self.commands = commands
+        self.output = sys.stdout
+        self.errstream = sys.stderr
         self.vol_matcher = re.compile(r'^([+-])(\d+)\Z')
         self.repl = False
 
@@ -746,7 +752,7 @@ class Commander:
     def one(self, command: str) -> None:
         remote = self.remote
         if command in self._command_typos:
-            print(f'tv: typo fixup: {command!r} -> {self._command_typos[command]!r}', file=sys.stderr)
+            print(f'tv: typo fixup: {command!r} -> {self._command_typos[command]!r}', file=self.errstream)
             command = self._command_typos[command]
         if command == 'on':
             remote.power = True
@@ -755,7 +761,7 @@ class Commander:
             remote.power = False
             return
         elif command in ('power', '?power'):
-            print(remote.power)
+            print(remote.power, file=self.output)
             return
         elif command == 'mute':
             remote.mute = True
@@ -781,10 +787,10 @@ class Commander:
             self.volume(self.next(command), True)
             return
         elif command in ('get-vol', 'get-volume', '?vol', '?volume'):
-            pretty_print_json(remote.volume)
+            pretty_print_json(remote.volume, stream=self.output)
             return
         elif command in ('read', 'read-text'):
-            print(remote.text)
+            print(remote.text, file=self.output)
             return
         elif command in ('write', 'write-text', 'send-text'):
             remote.text = self.next(command)
@@ -795,7 +801,7 @@ class Commander:
 
         elif command in ('apps', '?apps', 'list-apps'):
             for app in sorted(remote.list_apps()):
-                print(f' • {app}')
+                print(f' • {app}', file=self.output)
             return
         elif command in ('list-inputs', '?inputs'):
             maxlen_title, maxlen_label = 1, 1
@@ -807,7 +813,7 @@ class Commander:
                     maxlen_label = ll
             spec = '{title:<%d}  {label:<%d}  {uri}' % (maxlen_title, maxlen_label)
             for inp in remote.list_inputs():
-                print(spec.format(**inp))
+                print(spec.format(**inp), file=self.output)
             return
 
         elif command == 'key':
@@ -846,8 +852,8 @@ class Commander:
                     else:
                         sep = ' '
                 prev = k[0]
-                print(f'{sep}{k}', end='')
-            print()
+                print(f'{sep}{k}', end='', file=self.output)
+            print(file=self.output)
             return
         elif command in (':keypad', '!'):
             self.keypad_mode()
@@ -884,7 +890,7 @@ class Commander:
         elif command == ':query':
             known = [x for x in dir(remote) if x.startswith('query_')]
             for cmd in sorted(known):
-                print(':', cmd, sep='')
+                print(':', cmd, sep='', file=self.output)
             return
 
         elif command in ('help', '?help', ':help', '?'):
@@ -909,7 +915,7 @@ class Commander:
  :keys           - return list of known remote control keys for 'key' command
  :keypad         - enter a mode where we take arrow keys (&hjkl) to navigate
 If the first keycode is left-square bracket, params up until ] are all keys.
-''', end='')
+''', end='', file=self.output)
             return
 
         try:
@@ -939,10 +945,10 @@ If the first keycode is left-square bracket, params up until ] are all keys.
             if self.remote.config.readline_history.exists():
                 readline.read_history_file(self.remote.config.readline_history)
 
-        print('tv: This is a TV remote control, REPL mode; :keypad or ! for keypad')
-        print('tv: EOF (Ctrl-D) to quit, help for help, tab-completion available')
-        print('tv: "key" to enter the remote keys mode, :keys to list known keys')
-        print(f'tv: Target {self.remote.config.real_tv!r} [{self.remote.config.tv_host}]')
+        print('tv: This is a TV remote control, REPL mode; :keypad or ! for keypad', file=self.output)
+        print('tv: EOF (Ctrl-D) to quit, help for help, tab-completion available', file=self.output)
+        print('tv: "key" to enter the remote keys mode, :keys to list known keys', file=self.output)
+        print(f'tv: Target {self.remote.config.real_tv!r} [{self.remote.config.tv_host}]', file=self.output)
         self.cli_body_top()
 
         if hasattr(readline, 'write_history_file'):
@@ -967,7 +973,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
             msg = '«' + msg[-(MAX-1):]
         bookend = f'\033[41;36m *** \033[m'
         buf = msg + ' ' * (MAX - len(msg))
-        print(f'\033[s\033[1;1H{bookend}\033[1;35m{buf}\033[m{bookend}\033[u', end='', flush=True)
+        print(f'\033[s\033[1;1H{bookend}\033[1;35m{buf}\033[m{bookend}\033[u', end='', flush=True, file=self.output)
 
     def cdbg(self, append: typing.Optional[str]) -> None:
         if append is None:
@@ -991,8 +997,8 @@ If the first keycode is left-square bracket, params up until ] are all keys.
         try:
             return self._complete_commands_r(text, state)
         except Exception as e:
-            print(f'\noops: {e!r} inside completion', file=sys.stderr)
-            traceback.print_exc(file=sys.stdout)
+            print(f'\noops: {e!r} inside completion', file=self.errstream)
+            traceback.print_exc(file=self.output)
             raise
 
     def _complete_commands_r(self, text: str, state: int) -> typing.Optional[str]:
@@ -1043,7 +1049,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
 
     def use_completer(self, name: str, push_ctx: typing.Optional[str], text: str, state: int) -> str:
         if self.options.verbose >= 4:
-            print(f'use_completer {name!r} in state {state}', file=sys.stderr, flush=True)
+            print(f'use_completer {name!r} in state {state}', file=self.errstream, flush=True)
         self._prior_completer = getattr(self, name)
         self._prior_push_ctx = push_ctx
         return getattr(self, name)(text, state)
@@ -1129,13 +1135,13 @@ If the first keycode is left-square bracket, params up until ] are all keys.
         while True:
             try:
                 if self.options.verbose >= 4:
-                    print(f'ctx={self._rl_context_current!r} cmdset={self._command_set!r} stack={self._completion_context_stack!r} prev={self._complete_previous!r}', file=sys.stderr, flush=True)
+                    print(f'ctx={self._rl_context_current!r} cmdset={self._command_set!r} stack={self._completion_context_stack!r} prev={self._complete_previous!r}', file=self.errstream, flush=True)
                 cmd = input('tv> ')
             except EOFError:
-                print()
+                print(file=self.output)
                 return
             except KeyboardInterrupt as e:
-                print()
+                print(file=self.output)
                 raise Exit(f'killed by {e!r}') from e
             try:
                 cmd = cmd.strip()
@@ -1144,7 +1150,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
                 self.commands = shlex.split(cmd)
                 self.loop()
             except BadInput as e:
-                print('tv:', e, file=sys.stderr)
+                print('tv:', e, file=self.errstream)
             except SubRepl as e:
                 handler = 'cli_body_' + str(e)
                 if hasattr(self, handler):
@@ -1170,13 +1176,13 @@ If the first keycode is left-square bracket, params up until ] are all keys.
             try:
                 cmd = input('tv key> ')
             except EOFError:
-                print()
+                print(file=self.output)
                 return
             try:
                 self.commands = ['key', '['] + shlex.split(cmd) + [']']
                 self.loop()
             except BadInput as e:
-                print('tv key:', e, file=sys.stderr)
+                print('tv key:', e, file=self.errstream)
 
     # Rip this straight from my vlc-control project:
     # but add the return type; typing.Any for _curses.window
@@ -1255,18 +1261,98 @@ If the first keycode is left-square bracket, params up until ] are all keys.
                 return b.RemoteKey
         return ''
 
-    def keypad_mode(self):
-        if not sys.stdout.isatty():
-            raise BadInput('need stdout to be a tty for :keypad mode')
+    # typing.Any for _curses.window
+    def colon_mode(self, window: typing.Any, status_coords: typing.Tuple[int, int]):
+        outer = curses.newwin(
+            3, curses.COLS,
+            status_coords[0], 0)
+        outer.box()
+        outer.addstr(1, 1, ': ')
+        outer.refresh()
+        inner = curses.newwin(1, curses.COLS - 4, status_coords[0]+1, 3)
+        tb = curses.textpad.Textbox(inner)
 
-        def quit():
-            raise EOFError('Esc')
+        command_line = tb.edit()
+        outer.erase()
+        self.commands = shlex.split(command_line.strip())
 
+        window.move(*status_coords)
+        window.deleteln()
+        window.redrawln(status_coords[0], curses.LINES - status_coords[0])
+        window.refresh()
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        cmdr_stack_out, cmdr_stack_err = self.output, self.errstream
+        remote_stack_out, remote_stack_err = self.remote.output, self.remote.errstream
+        self.output, self.remote.output = stdout, stdout
+        self.errstream, self.remote.errstream = stderr, stderr
+        cleanups = []
         try:
-            screen = curses.initscr()
+            self.loop()
+        except Exit as e:
+            print(str(e), file=stderr)
+        finally:
+            emitted, cleanups = self.render_iostreams(window, status_coords, stdout, stderr)
+            if emitted:
+                window.timeout(-1)
+                _ = window.getkey()
+            while cleanups:
+                window.move(cleanups.pop(-1), 0)
+                window.deleteln()
+            window.redrawwin()
+            self.populate_screen(window)
+            window.refresh()
+            self.output, self.errstream = cmdr_stack_out, cmdr_stack_err
+            self.remote.output, self.remote.errstream = remote_stack_out, remote_stack_err
 
-            pad_top_y, pad_top_x = 1, 16
-            pad, pad_max_y, pad_max_x = self.curses_pad_for_text('''\
+    def render_iostreams(self,
+                         window: typing.Any, status_coords: typing.Tuple[int, int],
+                         stdout, stderr) -> typing.Tuple[bool, typing.List[int]]:
+        stdout.seek(0, 0)
+        stderr.seek(0, 0)
+        outstr = stdout.read()
+        errstr = stderr.read()
+        if not (outstr or errstr):
+            return False, []
+        out_pad, out_y, out_x = self.curses_pad_for_text(outstr)
+        err_pad, err_y, err_x = self.curses_pad_for_text(errstr)
+        if out_y + err_y + status_coords[0] > curses.LINES:
+            start_y = 1
+        else:
+            start_y = status_coords[0] + 1
+        delete_lines_to_cleanup = []
+        emitted = False
+        if out_pad is not None:
+            emitted = True
+            show_linecount = min(out_y, curses.LINES - start_y)
+            bottom = start_y + show_linecount
+            out_pad.refresh(out_y - show_linecount, 0,
+                            start_y, 0,
+                            bottom, curses.COLS)
+            if show_linecount == out_y:
+                delete_lines_to_cleanup.append(start_y)
+                window.move(start_y, 3)
+                window.addstr('┤ stdout ├')
+            start_y = bottom + 1
+        if err_pad is not None and start_y < curses.LINES:
+            emitted = True
+            show_linecount = min(err_y, curses.LINES - start_y)
+            bottom = start_y + show_linecount
+            err_pad.refresh(err_y - show_linecount, 0,
+                            start_y, 0,
+                            bottom, curses.COLS)
+            if show_linecount == err_y:
+                delete_lines_to_cleanup.append(start_y)
+                window.move(start_y, 3)
+                window.addstr('┤ stderr ├')
+            start_y = bottom + 1
+        return emitted, delete_lines_to_cleanup
+
+    def populate_screen(self, window: typing.Any) -> typing.Tuple[int, int]:
+        # returns status_coords
+        pad_top_y, pad_top_x = 1, 16
+        pad, pad_max_y, pad_max_x = self.curses_pad_for_text('''\
   You can click on the buttons to the left, or use key-strokes.
   Arrow keys and vi hjkl to move.
   Space/Enter to confirm.
@@ -1276,19 +1362,73 @@ If the first keycode is left-square bracket, params up until ] are all keys.
   = to Pause, + to Play
   [ and ] to lower and increase volume, 'm' to Mute
   Colors with capital initial: Yellow Blue Red Green
+  : to enter colon-command mode; after output, press any key
   Esc or 'q' to quit.'''.replace('\n', ' \n'))
 
-            self.curses_create_buttons()
+        self.curses_create_buttons()
+        window.refresh()
+        self.curses_refresh_buttons()
+        pad.refresh(0, 0,
+                    pad_top_y, pad_top_x,
+                    pad_top_y+pad_max_y, pad_top_x+pad_max_x)
+        window.move(pad_top_y, pad_top_x+3)
+        window.addstr('┤ Keypad mode ├')
+        return (22, pad_top_x+3)
 
-            screen.refresh()
-            self.curses_refresh_buttons()
-            pad.refresh(0, 0,
-                        pad_top_y, pad_top_x,
-                        pad_top_y+pad_max_y, pad_top_x+pad_max_x)
-            screen.move(pad_top_y, pad_top_x+3)
-            screen.addstr('┤ Keypad mode ├')
+    def kp_quit(self):
+        raise EOFError('Esc')
 
-            status_coords = (22, pad_top_x+3)
+    def make_kp_actions(self, window: typing.Any, status_coords: typing.Tuple[int, int]):
+        return {
+            'q': self.kp_quit,
+            '\033': self.kp_quit,
+            'KEY_BREAK': self.kp_quit,
+            'h': 'Left',
+            'j': 'Down',
+            'k': 'Up',
+            'l': 'Right',
+            'KEY_LEFT': 'Left',
+            'KEY_DOWN': 'Down',
+            'KEY_UP': 'Up',
+            'KEY_RIGHT': 'Right',
+            ' ': 'Confirm',
+            'KEY_ENTER': 'Confirm',
+            '\n': 'Confirm',
+            '0': 'Num0',
+            '1': 'Num1',
+            '2': 'Num2',
+            '3': 'Num3',
+            '4': 'Num4',
+            '5': 'Num5',
+            '6': 'Num6',
+            '7': 'Num7',
+            '8': 'Num8',
+            '9': 'Num9',
+            '<': 'Rewind',
+            '>': 'Forward',
+            'Y': 'Yellow',
+            'B': 'Blue',
+            'R': 'Red',
+            'G': 'Green',
+            'KEY_BACKSPACE': 'Return',
+            '\x08': 'Return',
+            '\x7F': 'Return',
+            '=': 'Pause',
+            '+': 'Play',
+            '[': 'VolumeDown',
+            ']': 'VolumeUp',
+            'm': 'Mute',
+            ':': lambda: self.colon_mode(window, status_coords),
+        }
+
+    def keypad_mode(self):
+        if not sys.stdout.isatty():
+            raise BadInput('need stdout to be a tty for :keypad mode')
+
+        try:
+            screen = curses.initscr()
+
+            status_coords = self.populate_screen(screen)
             screen.move(*status_coords)
             screen.deleteln()
 
@@ -1299,46 +1439,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
                 curses.BUTTON1_CLICKED | curses.BUTTON2_CLICKED | curses.BUTTON3_CLICKED,
             )
             screen.keypad(True)
-            actions = {
-                'q': quit,
-                '\033': quit,
-                'KEY_BREAK': quit,
-                'h': 'Left',
-                'j': 'Down',
-                'k': 'Up',
-                'l': 'Right',
-                'KEY_LEFT': 'Left',
-                'KEY_DOWN': 'Down',
-                'KEY_UP': 'Up',
-                'KEY_RIGHT': 'Right',
-                ' ': 'Confirm',
-                'KEY_ENTER': 'Confirm',
-                '\n': 'Confirm',
-                '0': 'Num0',
-                '1': 'Num1',
-                '2': 'Num2',
-                '3': 'Num3',
-                '4': 'Num4',
-                '5': 'Num5',
-                '6': 'Num6',
-                '7': 'Num7',
-                '8': 'Num8',
-                '9': 'Num9',
-                '<': 'Rewind',
-                '>': 'Forward',
-                'Y': 'Yellow',
-                'B': 'Blue',
-                'R': 'Red',
-                'G': 'Green',
-                'KEY_BACKSPACE': 'Return',
-                '\x08': 'Return',
-                '\x7F': 'Return',
-                '=': 'Pause',
-                '+': 'Play',
-                '[': 'VolumeDown',
-                ']': 'VolumeUp',
-                'm': 'Mute',
-            }
+            actions = self.make_kp_actions(screen, status_coords)
             screen.timeout(-1)
             while True:
                 timed_out = False
