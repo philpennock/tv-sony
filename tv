@@ -1287,6 +1287,12 @@ If the first keycode is left-square bracket, params up until ] are all keys.
         remote_stack_out, remote_stack_err = self.remote.output, self.remote.errstream
         self.output, self.remote.output = stdout, stdout
         self.errstream, self.remote.errstream = stderr, stderr
+        # If we don't reset repl then `key` without parameters drops us back to
+        # the repl out of curses _if_ we started via REPL but is rejected if
+        # directly started in keypad mode.  Be consistent, temporarily wipe
+        # repl.
+        cmdr_repl = self.repl
+        self.repl = None
         cleanups = []
         try:
             self.loop()
@@ -1305,6 +1311,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
             window.refresh()
             self.output, self.errstream = cmdr_stack_out, cmdr_stack_err
             self.remote.output, self.remote.errstream = remote_stack_out, remote_stack_err
+            self.repl = cmdr_repl
 
     def render_iostreams(self,
                          window: typing.Any, status_coords: typing.Tuple[int, int],
