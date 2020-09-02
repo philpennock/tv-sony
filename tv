@@ -727,6 +727,7 @@ class Commander:
             'danger-reboot',
             ':write', ':default', ':encrypt-setup', ':encrypt-fetch', ':about', ':playing', ':query',
             'help', '?help', ':help',  # skip '?'
+            ':version',
         ] + [':'+q for q in dir(self.remote) if q.startswith('query_')]
         # If changing this from sorted, check completion logic.
         self._top_completions = sorted(all_commands)
@@ -914,8 +915,12 @@ class Commander:
  :encrypt-fetch  - force-fetch current TV public key
  :keys           - return list of known remote control keys for 'key' command
  :keypad         - enter a mode where we take arrow keys (&hjkl) to navigate
+ :help, :version - the usual
 If the first keycode is left-square bracket, params up until ] are all keys.
 ''', end='', file=self.output)
+            return
+        elif command == ':version':
+            print(VERSION_INFO, file=self.output)
             return
 
         try:
@@ -1186,14 +1191,14 @@ If the first keycode is left-square bracket, params up until ] are all keys.
 
     # Rip this straight from my vlc-control project:
     # but add the return type; typing.Any for _curses.window
-    def curses_pad_for_text(self, text: str) -> typing.Tuple[typing.Any, int, int]:
+    def curses_pad_for_text(self, text: str, min_width=0) -> typing.Tuple[typing.Any, int, int]:
         if not text:
             return (None, 0, 0)
         lines = text.split('\n')
         if not lines[-1]:
             lines.pop()
         ysize = len(lines) + 2
-        xsize = len(max(lines, key=len)) + 2
+        xsize = max(min_width, len(max(lines, key=len))) + 2
         pad = curses.newpad(ysize, xsize)
         pad.box()
         for y, l in enumerate(lines):
@@ -1322,8 +1327,9 @@ If the first keycode is left-square bracket, params up until ] are all keys.
         errstr = stderr.read()
         if not (outstr or errstr):
             return False, []
-        out_pad, out_y, out_x = self.curses_pad_for_text(outstr)
-        err_pad, err_y, err_x = self.curses_pad_for_text(errstr)
+        min_width = min(curses.COLS, 70)
+        out_pad, out_y, out_x = self.curses_pad_for_text(outstr, min_width)
+        err_pad, err_y, err_x = self.curses_pad_for_text(errstr, min_width)
         if out_y + err_y + status_coords[0] > curses.LINES:
             start_y = 1
         else:
