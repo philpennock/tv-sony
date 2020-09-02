@@ -61,7 +61,7 @@ SCRIPT_DIR = pathlib.Path(__file__).absolute().parent
 # FIXME: this is not fully XDG-compliant
 _APP_NAME = pathlib.Path('tv')
 _HOME_DIR = _APP_NAME.home()
-VERSION_INFO = '0.2.1'
+VERSION_INFO = '0.2.2'
 
 
 def _xdg_dir(varname: str, home_rel_default: typing.Sequence[str]) -> pathlib.Path:
