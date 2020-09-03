@@ -1191,7 +1191,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
 
     # Rip this straight from my vlc-control project:
     # but add the return type; typing.Any for _curses.window
-    def curses_pad_for_text(self, text: str, min_width=0) -> typing.Tuple[typing.Any, int, int]:
+    def curses_pad_for_text(self, text: str, min_width=0, box=True) -> typing.Tuple[typing.Any, int, int]:
         if not text:
             return (None, 0, 0)
         lines = text.split('\n')
@@ -1200,7 +1200,8 @@ If the first keycode is left-square bracket, params up until ] are all keys.
         ysize = len(lines) + 2
         xsize = max(min_width, len(max(lines, key=len))) + 2
         pad = curses.newpad(ysize, xsize)
-        pad.box()
+        if box:
+            pad.box()
         for y, l in enumerate(lines):
             pad.addstr(y+1, 1, l)
         return (pad, ysize, xsize)
@@ -1213,11 +1214,12 @@ If the first keycode is left-square bracket, params up until ] are all keys.
         # but there's going to be "not very many" buttons, so flat-list walking
         # is tolerable.
 
-    def curses_button(self, text: str, action: str, y: int, x: int) -> None:
+    def curses_button(self, text: str, action: str, y: int, x: int, box=True) -> None:
         # Our assumption is that text will be Unicode with presentation
         # controls and will always look like it's one character wide.
         p = curses.newpad(3, 4)
-        p.box()
+        if box:
+            p.box()
         p.addstr(1, 1, text + ' ')
         self._all_curses_buttons.append(ButtonMade(y, x, 3, 4, p, action))
 
@@ -1248,7 +1250,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
         ButtonSpec(19, 6, 'B', 'Blue'),
         ButtonSpec(19, 11, 'R', 'Red'),
         ButtonSpec(19, 16, 'G', 'Green'),
-        ButtonSpec(20, 37, '🌍', None),
+        ButtonSpec(19, 36, '🌍', None),
         ButtonSpec(19, 41, '🗢', 'Audio'),
         ButtonSpec(19, 46, '🖉', 'SubTitle'),
     ]
@@ -1259,8 +1261,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
             if b.RemoteKey is not None:
                 self.curses_button(b.Text, b.RemoteKey, b.y, b.x)
             else:
-                window.move(b.y, b.x)
-                window.addstr(b.Text)
+                self.curses_button(b.Text, None, b.y, b.x, box=False)
         for d in range(10):
             ds = str(d)
             self.curses_button(ds, 'Num'+ds, 16, 1 + 5 * d)
@@ -1270,6 +1271,8 @@ If the first keycode is left-square bracket, params up until ] are all keys.
             off_y = y - b.top_y
             off_x = x - b.top_x
             if off_y >= 0 and off_y < b.height and off_x >= 0 and off_x < b.width:
+                if b.RemoteKey is None:
+                    return ''
                 return b.RemoteKey
         return ''
 
