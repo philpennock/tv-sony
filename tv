@@ -1248,12 +1248,19 @@ If the first keycode is left-square bracket, params up until ] are all keys.
         ButtonSpec(19, 6, 'B', 'Blue'),
         ButtonSpec(19, 11, 'R', 'Red'),
         ButtonSpec(19, 16, 'G', 'Green'),
+        ButtonSpec(20, 37, '🌍', None),
+        ButtonSpec(19, 41, '🗢', 'Audio'),
+        ButtonSpec(19, 46, '🖉', 'SubTitle'),
     ]
 
-    def curses_create_buttons(self) -> None:
+    def curses_create_buttons(self, window: typing.Any) -> None:
         self.curses_reset_button_list()
         for b in Commander._ButtonList:
-            self.curses_button(b.Text, b.RemoteKey, b.y, b.x)
+            if b.RemoteKey is not None:
+                self.curses_button(b.Text, b.RemoteKey, b.y, b.x)
+            else:
+                window.move(b.y, b.x)
+                window.addstr(b.Text)
         for d in range(10):
             ds = str(d)
             self.curses_button(ds, 'Num'+ds, 16, 1 + 5 * d)
@@ -1374,11 +1381,12 @@ If the first keycode is left-square bracket, params up until ] are all keys.
   < and > to Rewind and Forward.
   = to Pause, + to Play
   [ and ] to lower and increase volume, 'm' to Mute
+  'a' for Audio, 's' for SubTitle
   Colors with capital initial: Yellow Blue Red Green
   : to enter colon-command mode; after output, press any key
   Esc or 'q' to quit.'''.replace('\n', ' \n'))
 
-        self.curses_create_buttons()
+        self.curses_create_buttons(window)
         window.refresh()
         self.curses_refresh_buttons()
         pad.refresh(0, 0,
@@ -1431,6 +1439,8 @@ If the first keycode is left-square bracket, params up until ] are all keys.
             '[': 'VolumeDown',
             ']': 'VolumeUp',
             'm': 'Mute',
+            'a': 'Audio',
+            's': 'SubTitle',
             ':': lambda: self.colon_mode(window, status_coords),
         }
 
