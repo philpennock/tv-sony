@@ -1379,6 +1379,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
     # layer.
     _ButtonList: typing.List[ButtonSpec] = [
         ButtonSpec(1, 6, '↑', 'Up'),
+        ButtonSpec(1, 11, 'H', 'Home'),
         ButtonSpec(4, 1, '←', 'Left'),
         ButtonSpec(4, 6, '⏎', 'Confirm'),
         ButtonSpec(4, 11, '→', 'Right'),
@@ -1525,7 +1526,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
   Arrow keys and vi hjkl to move.
   Space/Enter to confirm.
   Backspace to 'Return' (go back)
-  Digits to send digit keys.
+  Digits to send digit keys.  Capital 'H' for Home.
   < and > to Rewind and Forward.
   = to Pause, + to Play
   [ and ] to lower and increase volume, 'm' to Mute
@@ -1579,6 +1580,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
             'B': 'Blue',
             'R': 'Red',
             'G': 'Green',
+            'H': 'Home',
             'KEY_BACKSPACE': 'Return',
             '\x08': 'Return',
             '\x7F': 'Return',
