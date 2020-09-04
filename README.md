@@ -83,9 +83,34 @@ on, to be an in-tty GUI.
 
 ## Setup
 
-At present, the only authentication mode supported is to use a PIN, which the
-TV calls a "Pre-Shared Key".  You will need to enable this in the TV menus
-first.
+There are two options: one which involves the on-screen display of a PIN which
+you need to enter into the app, and one which is "Pre-Shared Key", in which
+you create effectively a password in the TV menus and supply the password to
+this app too.
+
+### On-Screen Display
+
+This should normally be available; I've not gotten enough experience using
+this to confirm whether or not it's true that this will stop working after a
+few weeks.  We store and update cookies so _should_ be okay.  But this support
+is very new.
+
+```sh
+$ tv --register `hostname -s` -H 192.168.1.2 -t myname
+```
+
+The parameter to `--register` is passed to the TV as the name of this client,
+so you should use the short name of the machine where `tv` is running.  The TV
+should show an on-screen pop-up with a four-digit PIN code.  If you see
+nothing, kill the `tv` process (Control-C) and try again.
+
+Enter the PIN code into `tv` at the prompt.
+
+You should be done.
+
+### Pre-Shared Key
+
+You will need to enable this in the TV menus first.
 
 Where this is in the menus changes with TV operating system updates.  Loosely,
 head into the settings / cog, go to Network, and look for IP control and
@@ -193,7 +218,8 @@ Thus the default locations are:
   `readline.conf` file in that directory and it will be passed to the Python
   bindings to your system readline/libedit/whatever.
 * `~/.cache/tv/` : where we keep copies of data pulled from the TV (RSA keys,
-  list of installed apps) and keep our readline history.
+  list of installed apps) and keep our readline history.  Also UUIDs, cookies
+  and other data associated with registration pairing.
 * `~/.local/share/tv/` : locally generated data which should persist is stored
    here; at present, that's client RSA keys, which are not (yet?) used.
 

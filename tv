@@ -35,6 +35,7 @@ import sys
 import time
 import traceback
 import typing
+import uuid
 
 # TV can encrypt text strings, which we want for sending/reading passwords in app prompts
 import cryptography.hazmat.backends
@@ -60,8 +61,9 @@ SCRIPT_DIR = pathlib.Path(__file__).absolute().parent
 
 # FIXME: this is not fully XDG-compliant
 _APP_NAME = pathlib.Path('tv')
+_REGISTER_APP_NAME = 'tv-sony'
 _HOME_DIR = _APP_NAME.home()
-VERSION_INFO = '0.2.2'
+VERSION_INFO = '0.2.3'
 
 
 def _xdg_dir(varname: str, home_rel_default: typing.Sequence[str]) -> pathlib.Path:
@@ -204,16 +206,23 @@ class Config:
         # .tv is the config name as given, often 'default
         # .real_tv is the actual name, use this to write files
         self.tv = self.options.tv
-        try:
-            self.tv_pin = self.derive_field(Config.PIN_OPTION, Config.PIN_FILEEXT)
-            self.tv_host = self.derive_field(Config.HOST_OPTION, Config.HOST_FILEEXT)
-        except FileNotFoundError as e:
-            raise Unconfigured(f'missing stored config for tv ({self.tv})') from e
         self.using_default = self.tv == _DEFAULT_TV
         if self.using_default:
             self.real_tv = self._find_real_tvname()
         else:
             self.real_tv = self.tv
+
+        try:
+            self.tv_host = self.derive_field(Config.HOST_OPTION, Config.HOST_FILEEXT)
+            if self.options.register:
+                self.remote_name = self.options.register
+            elif self.auth_cookie_file.exists():
+                self.load_cookies()
+            else:
+                self.tv_pin = self.derive_field(Config.PIN_OPTION, Config.PIN_FILEEXT)
+        except FileNotFoundError as e:
+            raise Unconfigured(f'missing stored config for tv ({self.tv})') from e
+
         self.our_rsakey: typing.Optional[cryptography.hazmat.primitives.asymmetric.rsa.RSAPublicKey] = None
         self.aes_iv: typing.Optional[bytes] = None
         self.aes_key: typing.Optional[bytes] = None
@@ -229,13 +238,31 @@ class Config:
         fn = _CONFIG_DIR / (self.options.tv + '.' + base)
         return fn.read_text().strip()
 
+    def load_cookies(self) -> None:
+        self.cookiejar = requests.cookies.cookiejar_from_dict(
+            json.load(self.auth_cookie_file.open()),
+        )
+
     def _find_real_tvname(self) -> str:
-        default_pin_file = _CONFIG_DIR / (_DEFAULT_TV + '.' + Config.PIN_FILEEXT)
-        return default_pin_file.resolve().stem
+        # This can't use the PIN file, since that no longer necessarily exists
+        default_hn_file = _CONFIG_DIR / (_DEFAULT_TV + '.' + Config.HOST_FILEEXT)
+        return default_hn_file.resolve().stem
 
     @property
     def readline_config(self) -> pathlib.Path:
         return _CONFIG_DIR / 'readline.conf'
+
+    @property
+    def auth_cookie_file(self) -> pathlib.Path:
+        return _CACHE_DIR / (self.real_tv + '.cookies.json')
+
+    @property
+    def auth_uuid_file(self) -> pathlib.Path:
+        return _CACHE_DIR / (self.real_tv + '.uuid')
+
+    @property
+    def auth_remotename_file(self) -> pathlib.Path:
+        return _CACHE_DIR / (self.real_tv + '.remotename')
 
     @property
     def tv_keyfile(self) -> pathlib.Path:
@@ -280,7 +307,11 @@ class Config:
         pin_file = _CONFIG_DIR / (write_name + '.' + Config.PIN_FILEEXT)
         host_file = _CONFIG_DIR / (write_name + '.' + Config.HOST_FILEEXT)
         # Don't update defaults until both named entries have been written
-        for f, content in [(pin_file, self.tv_pin), (host_file, self.tv_host)]:
+        to_store = []
+        if hasattr(self, 'tv_pin'):
+            to_store.append((pin_file, self.tv_pin))
+        to_store.append((host_file, self.tv_host))
+        for f, content in to_store:
             if f.exists():
                 f.unlink()
             f.touch(mode=0o600, exist_ok=False)
@@ -294,16 +325,27 @@ class Config:
         default_host_file = _CONFIG_DIR / (_DEFAULT_TV + '.' + Config.HOST_FILEEXT)
         pin_file = _CONFIG_DIR / (target_tvname + '.' + Config.PIN_FILEEXT)
         host_file = _CONFIG_DIR / (target_tvname + '.' + Config.HOST_FILEEXT)
-        if not pin_file.exists():
-            raise BadInput(f"can't repoint default TV to {target_tvname!r}, missing {pin_file.name!r}")
+        to_link = []
+        to_unlink = []
         if not host_file.exists():
             raise BadInput(f"can't repoint default TV to {target_tvname!r}, missing {host_file.name!r}")
-        for src, dest in [(default_pin_file, pin_file), (default_host_file, host_file)]:
+        if not pin_file.exists():
+            if not self.auth_cookie_file.exists():
+                raise BadInput(f"can't repoint default TV to {target_tvname!r}, missing {pin_file.name!r}")
+            else:
+                to_unlink.append(default_pin_file)
+        else:
+            to_link.append((default_pin_file, pin_file))
+        to_link.append((default_host_file, host_file))
+        for src, dest in to_link:
             if src.exists() and not src.is_symlink():
                 src.rename(src.with_suffix('.old' + src.suffix))
             if src.exists() or src.is_symlink():
                 src.unlink()
             src.symlink_to(dest.name)
+        for stale in to_unlink:
+            if stale.exists():
+                stale.unlink()
 
     def load_pubkey_b64(self, b64data: str) -> cryptography.hazmat.primitives.asymmetric.rsa.RSAPublicKey:
         return self.load_pubkey_bin(base64.b64decode(b64data, validate=True))
@@ -385,7 +427,8 @@ class Remote:
         self.errstream = sys.stderr
         self.next_id = 1
         self.addr = config.tv_host
-        self.pin = config.tv_pin
+        if hasattr(config, 'tv_pin'):
+            self.pin = config.tv_pin
         self._tv_pubkey_b64: typing.Optional[str] = None
         self._tv_pubkey_bin: typing.Optional[bytes] = None
         self._ircc_dict: typing.Optional[typing.Dict[str, IRCCKeyCode]] = None
@@ -402,16 +445,22 @@ class Remote:
     def _setup_requests(self) -> None:
         self.session = requests.Session()
         self.session.headers['User-Agent'] = DEF_USERAGENT
-        self.session.headers['X-Auth-PSK'] = self.pin
+        if hasattr(self.config, 'cookiejar'):
+            self.session.cookies = self.config.cookiejar
+        elif hasattr(self, 'pin'):
+            self.session.headers['X-Auth-PSK'] = self.pin
 
-    def _send(self, service: str, method: str, params: typing.Dict, *, api_version='1.0'):
+    def _send(self, service: str, method: str, params: typing.Union[typing.Dict, typing.List], *, api_version='1.0'):
         url = f'http://{self.addr}/sony/{service}'
         if len(params) == 1 and '_empty' in params:
             # The introspection call, alone, seems to want [""] for params and nothing else will do.
             # (It also returns inside 'results' instead of 'result')
             payload_params = ['']
-        elif params:
+        elif params and isinstance(params, dict):
             payload_params = [params]
+        elif params and isinstance(params, list):
+            # remote pairing sends _two_ dictionaries
+            payload_params = params
         else:
             payload_params = []
         payload_d = {
@@ -421,20 +470,29 @@ class Remote:
             'params': payload_params
         }
         self.next_id += 1
+        req = self.session.prepare_request(requests.Request('POST', url, json=payload_d))
         if self.verbosity(3):
             print(f'> POST <{url}> ', end='', file=self.output, flush=True)
+            if self.verbosity(5):
+                # don't use pretty_print_json, an auth header with bytes will upset the JSON encoder
+                print('', file=self.output)
+                for k, v in req.headers.items():
+                    print(f'{k}: {v}', file=self.output)
             pretty_print_json(payload_d, stream=self.output)
         elif self.verbosity(2):
             print(f' >> {service} / {method}', file=self.output)
-        r = self.session.post(url, json=payload_d)
+
+        # Just because I want to be able to dump all request headers, things get hairy.
+        settings = self.session.merge_environment_settings(req.url, {}, None, None, None)
+        r = self.session.send(req, **settings)
         return r
 
-    def send(self, service: str, method: str, params: typing.Dict, **kwargs) -> None:
+    def send(self, service: str, method: str, params: typing.Union[typing.Dict, typing.List], **kwargs) -> None:
         r = self._send(service, method, params, **kwargs)
         if self.verbosity():
             pretty_print_json(r.json(), stream=self.output)
 
-    def query(self, service: str, method: str, params: typing.Dict, **kwargs) -> typing.Dict:
+    def query(self, service: str, method: str, params: typing.Union[typing.Dict, typing.List], **kwargs) -> typing.Dict:
         res = self._send(service, method, params, **kwargs)
         if self.verbosity(3):
             print(f'< {res.status_code} {res.reason}', file=self.output)
@@ -449,6 +507,12 @@ class Remote:
         code, message = result['error'][:2]
         raise Exit(f'failed in {label}: code {code} message: {message}')
 
+    def checked_send(self, service: str, method: str, params: typing.Union[typing.Dict, typing.List], **kwargs) -> None:
+        r = self._send(service, method, params, **kwargs)
+        if self.verbosity():
+            pretty_print_json(r.json(), stream=self.output)
+        self.check_error(inspect.stack()[1].function, r.json())
+
     # <https://pro-bravia.sony.net/develop/integrate/rest-api/spec/>
     KNOWN_SERVICES = 'guide appControl audio avContent encryption system videoScreen'.split()
 
@@ -457,12 +521,12 @@ class Remote:
         return resp['result'][0]['status']
 
     def _set_power(self, power_state: bool) -> None:
-        self.send('system', 'setPowerStatus', {'status': power_state})
+        self.checked_send('system', 'setPowerStatus', {'status': power_state})
 
     power = property(_get_power, _set_power, None)
 
     def _set_mute(self, mute_state: bool) -> None:
-        self.send('audio', 'setAudioMute', {'status': mute_state})
+        self.checked_send('audio', 'setAudioMute', {'status': mute_state})
 
     mute = property(None, _set_mute, None)
 
@@ -470,7 +534,7 @@ class Remote:
     # might build a map of uris to labels and try to simplify through that, for a better reader?
     def set_external_input(self, kind: str, port: str) -> None:
         uri = f'extInput:{kind}?port={port}'
-        self.send('avContent', 'setPlayContent', {'uri': uri})
+        self.checked_send('avContent', 'setPlayContent', {'uri': uri})
 
     def _get_volume(self) -> typing.List[typing.Dict]:
         resp = self.query('audio', 'getVolumeInformation', {})
@@ -478,12 +542,12 @@ class Remote:
 
     def _set_volume(self, new_volume: str) -> None:
         # api 1.2 lets us control if the on-screen volume UI should be displayed; stick to 1.0, accept UI defaults
-        self.send('audio', 'setAudioVolume', {'target': 'speaker', 'volume': new_volume})
+        self.checked_send('audio', 'setAudioVolume', {'target': 'speaker', 'volume': new_volume})
 
     volume = property(_get_volume, _set_volume, None)
 
     def reboot(self) -> None:
-        self.send('system', 'requestReboot', {})
+        self.checked_send('system', 'requestReboot', {})
 
     def list_apps(self) -> typing.List[str]:
         apps = self.query('appControl', 'getApplicationList', {})
@@ -499,7 +563,7 @@ class Remote:
             applist = ', '.join(map(lambda x: shlex.quote(html.unescape(x['title'])), filtered))
             raise BadInput(f'too many apps found for {appname!r}: {applist}')
         uri = filtered[0]['uri']
-        self.send('appControl', 'setActiveApp', {'uri': uri})
+        self.checked_send('appControl', 'setActiveApp', {'uri': uri})
 
     def list_inputs(self) -> typing.List[typing.Dict]:
         inputs = self.query('avContent', 'getCurrentExternalInputsStatus', {}, api_version='1.1')
@@ -672,6 +736,73 @@ class Remote:
         res = self.query(service, 'getMethodTypes', {'_empty': True})
         self.check_error(inspect.stack()[0].function, res)
         pretty_print_json(res['results'], stream=self.output)
+
+    def register_remote(self, *, nickname: str, devicename: str, pin_request_cb) -> None:
+        # Found the existence of this call and the values to use in random
+        # Google results, copy/pasted around the Net as samizdat.
+
+        for drop in 'X-Auth-PSK', 'Authorization':
+            if drop in self.session.headers:
+                del self.session.headers[drop]
+
+        our_uuid = str(uuid.uuid4())
+        register_params = [
+            {
+                'clientid': nickname + ':' + our_uuid,
+                'nickname': f'{nickname} ({_REGISTER_APP_NAME})',
+                'level': 'private',
+            },
+            [
+                {
+                    'value': 'no',
+                    'function': 'WOL',
+                },
+                {
+                    'value': 'yes',
+                    'function': 'pinRegistration',
+                }
+            ]
+        ]
+
+        trigger = self.query('accessControl', 'actRegister', register_params)
+        # We want to raise an exception for anything _except_ a 401, which is
+        # reflected in the JSON response too
+        if 'error' in trigger and trigger['error'][0] == 401:
+            pass
+        else:
+            self.check_error('register_remote', trigger)
+
+        try:
+            challenge = pin_request_cb()
+        except EOFError:
+            challenge = ''
+        challenge = challenge.strip()
+        if not challenge:
+            raise Exit('no PIN entered')
+        authdata = b'Basic ' + base64.b64encode(b':'+challenge.encode('latin1')).strip()
+
+        self.next_id -= 1  # retry the _same_ request
+        self.session.headers['Authorization'] = authdata.decode('ascii')
+        res = self._send('accessControl', 'actRegister', register_params)
+        del self.session.headers['Authorization']
+        pretty_print_json(res.json(), stream=self.output)  # FIXME
+        self.check_error('register_remote', res.json())
+
+        self.config.auth_remotename_file.write_text(nickname + '\n')
+        self.config.auth_uuid_file.write_text(our_uuid + '\n')
+        json.dump(
+            requests.utils.dict_from_cookiejar(self.session.cookies),
+            self.config.auth_cookie_file.open('w'),
+            indent=1, sort_keys=True)
+        self.config.persist_current(devicename)
+
+    def persist_cookies_maybe(self) -> None:
+        if not hasattr(self.config, 'cookiejar'):
+            return
+        json.dump(
+            requests.utils.dict_from_cookiejar(self.session.cookies),
+            self.config.auth_cookie_file.open('w'),
+            indent=1, sort_keys=True)
 
 
 class SubRepl(Exception):
@@ -1564,6 +1695,9 @@ def _setup_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument('--pin',
                         type=str, default='',
                         help='override PIN from config')
+    parser.add_argument('--register',
+                        type=str, default='',
+                        help='Name of this remote to register with the TV (instead of PIN)')
     parser.add_argument('-v', '--verbose',
                         action='count', default=0,
                         help='Be more verbose')
@@ -1592,11 +1726,28 @@ def _main(args: typing.List[str], argv0: str) -> int:
 
     remote = Remote(config)
 
+    if options.register:
+        def challenge_pin_entry():
+            # I don't think there's any point using getpass, since anything
+            # being entered here is visible to everyone who can see the TV, so
+            # probably more than can see the computer screen.  So make it easy
+            # to see both and compare, by leaving echo on.
+            return input('PIN on screen> ')
+        remote.register_remote(
+            nickname=options.register,
+            devicename=config.real_tv,
+            pin_request_cb=challenge_pin_entry)
+        return 0
+
     commander = Commander(remote, options.rest)
-    if options.rest:
-        commander.loop()
-    else:
-        commander.cli()
+    try:
+        if options.rest:
+            commander.loop()
+        else:
+            commander.cli()
+    finally:
+        remote.persist_cookies_maybe()
+
     return 0
 
 
