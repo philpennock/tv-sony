@@ -406,15 +406,23 @@ class Remote:
 
     def _send(self, service: str, method: str, params: typing.Dict, *, api_version='1.0'):
         url = f'http://{self.addr}/sony/{service}'
+        if len(params) == 1 and '_empty' in params:
+            # The introspection call, alone, seems to want [""] for params and nothing else will do.
+            # (It also returns inside 'results' instead of 'result')
+            payload_params = ['']
+        elif params:
+            payload_params = [params]
+        else:
+            payload_params = []
         payload_d = {
             'method': method,
             'version': api_version,
             'id': self.next_id,
-            'params': [params] if params else [],
+            'params': payload_params
         }
         self.next_id += 1
         if self.verbosity(3):
-            print(f'> POST <{url}> ', end='', file=self.output)
+            print(f'> POST <{url}> ', end='', file=self.output, flush=True)
             pretty_print_json(payload_d, stream=self.output)
         elif self.verbosity(2):
             print(f' >> {service} / {method}', file=self.output)
@@ -658,6 +666,12 @@ class Remote:
         for i, k in enumerate(self._ircc_dict.keys()):
             keylist[i] = self._ircc_dict[k].KeyName
         return sorted(keylist)
+
+    # There's an introspection API!
+    def introspect(self, service: str) -> None:
+        res = self.query(service, 'getMethodTypes', {'_empty': True})
+        self.check_error(inspect.stack()[0].function, res)
+        pretty_print_json(res['results'], stream=self.output)
 
 
 class SubRepl(Exception):
@@ -1618,10 +1632,12 @@ if __name__ == '__main__':
     sys.exit(rv)
 
 # Debugging:
-# import pathlib; __name__, __file__ = 'debug-tv', 'tv'; exec(pathlib.Path('~/tools/site/common/tv').expanduser().read_text())
+# import pathlib; __name__, __file__ = 'debug-tv', 'tv'; exec(pathlib.Path('tv').read_text())
 if __name__ == 'debug-tv':
     parser = _setup_cli_parser()
     options = parser.parse_args(args=[':help'])
+    if 'VERBOSE' in os.environ:
+        options.verbose = int(os.environ['VERBOSE'])
     config = Config(options)
     remote = Remote(config)
 
