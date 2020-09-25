@@ -116,6 +116,11 @@ class Unconfigured(Exit):
     pass
 
 
+class BadAuthentication(Exit):
+    """Authentication data is bad."""
+    pass
+
+
 # InfraRed Compatible Control data from the TV, for the SOAP interface
 IRCCKeyCode = collections.namedtuple('IRCCKeyCode', ['KeyName', 'Rawcode'])
 
@@ -505,7 +510,10 @@ class Remote:
         if 'error' not in result:
             return
         code, message = result['error'][:2]
-        raise Exit(f'failed in {label}: code {code} message: {message}')
+        exitmsg = f'failed in {label}: code {code} message: {message}'
+        if code == 403:
+            raise BadAuthentication(exitmsg)
+        raise Exit(exitmsg)
 
     def checked_send(self, service: str, method: str, params: typing.Union[typing.Dict, typing.List], **kwargs) -> None:
         r = self._send(service, method, params, **kwargs)
@@ -551,6 +559,7 @@ class Remote:
 
     def list_apps(self) -> typing.List[str]:
         apps = self.query('appControl', 'getApplicationList', {})
+        self.check_error(inspect.stack()[0].function, apps)
         return [html.unescape(x['title']) for x in apps['result'][0]]
 
     def launch_app(self, appname: str) -> None:
@@ -884,8 +893,13 @@ class Commander:
         if app_cache.exists() and (time.time() - app_cache.stat().st_mtime) < self.remote.config.max_age_app_cache:
             app_names = json.load(app_cache.open())
         else:
-            app_names = self.remote.list_apps()
-            json.dump(app_names, app_cache.open('w'), indent=1, sort_keys=True)
+            try:
+                app_names = self.remote.list_apps()
+                json.dump(app_names, app_cache.open('w'), indent=1, sort_keys=True)
+            except BadAuthentication as e:
+                app_names = []
+                self.remote.verbose('completion setup: failed to get list of app names from the TV', level=0)
+                self.remote.verbose(str(e), level=0)
         self._app_completions = sorted(app_names)
 
         # The MapSubCommands third item in the tuple is to let us walk down so a third level
@@ -1700,6 +1714,9 @@ def _setup_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument('--register',
                         type=str, default='',
                         help='Name of this remote to register with the TV (instead of PIN)')
+    parser.add_argument('--reregister', '--re-register',
+                        action='store_true', default=False,
+                        help='Force re-register of current TV')
     parser.add_argument('-v', '--verbose',
                         action='count', default=0,
                         help='Be more verbose')
@@ -1728,7 +1745,10 @@ def _main(args: typing.List[str], argv0: str) -> int:
 
     remote = Remote(config)
 
-    if options.register:
+    if options.register or options.reregister:
+        if options.reregister and not options.register:
+            options.register = config.real_tv
+
         def challenge_pin_entry():
             # I don't think there's any point using getpass, since anything
             # being entered here is visible to everyone who can see the TV, so
