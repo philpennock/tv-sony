@@ -1557,6 +1557,8 @@ If the first keycode is left-square bracket, params up until ] are all keys.
                     pad_top_y+pad_max_y, pad_top_x+pad_max_x)
         window.move(pad_top_y, pad_top_x+3)
         window.addstr('┤ Keypad mode ├')
+        window.move(0, 0)
+        window.addstr('[ ' + self.remote.config.real_tv + ' ]')
         return (22, pad_top_x+3)
 
     def kp_quit(self):
