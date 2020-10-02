@@ -1542,7 +1542,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
   Backspace to 'Return' (go back)
   Digits to send digit keys.  Capital 'H' for Home.
   < and > to Rewind and Forward.
-  = to Pause, + to Play
+  = to Pause, + to Play, - to Stop
   [ and ] to lower and increase volume, 'm' to Mute
   'a' for Audio, 's' for SubTitle
   Colors with capital initial: Yellow Blue Red Green
@@ -1602,6 +1602,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
             '\x7F': 'Return',
             '=': 'Pause',
             '+': 'Play',
+            '-': 'Stop',
             '[': 'VolumeDown',
             ']': 'VolumeUp',
             'm': 'Mute',
