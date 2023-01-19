@@ -1135,7 +1135,7 @@ If the first keycode is left-square bracket, params up until ] are all keys.
         MAX = 70
         if len(msg) > MAX:
             msg = '«' + msg[-(MAX-1):]
-        bookend = f'\033[41;36m *** \033[m'
+        bookend = '\033[41;36m *** \033[m'
         buf = msg + ' ' * (MAX - len(msg))
         print(f'\033[s\033[1;1H{bookend}\033[1;35m{buf}\033[m{bookend}\033[u', end='', flush=True, file=self.output)
 
@@ -1299,7 +1299,11 @@ If the first keycode is left-square bracket, params up until ] are all keys.
         while True:
             try:
                 if self.options.verbose >= 4:
-                    print(f'ctx={self._rl_context_current!r} cmdset={self._command_set!r} stack={self._completion_context_stack!r} prev={self._complete_previous!r}', file=self.errstream, flush=True)
+                    print(f'ctx={self._rl_context_current!r} ' +
+                          f'cmdset={self._command_set!r} ' +
+                          f'stack={self._completion_context_stack!r} ' +
+                          f'prev={self._complete_previous!r}',
+                          file=self.errstream, flush=True)
                 cmd = input('tv> ')
             except EOFError:
                 print(file=self.output)
@@ -1361,8 +1365,8 @@ If the first keycode is left-square bracket, params up until ] are all keys.
         pad = curses.newpad(ysize, xsize)
         if box:
             pad.box()
-        for y, l in enumerate(lines):
-            pad.addstr(y+1, 1, l)
+        for y, line in enumerate(lines):
+            pad.addstr(y+1, 1, line)
         return (pad, ysize, xsize)
 
     def curses_reset_button_list(self):
